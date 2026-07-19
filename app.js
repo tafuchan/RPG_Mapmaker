@@ -93,12 +93,20 @@ function resizeCanvas() {
   render();
 }
 
-function drawTile(id, dx, dy, dw, dh) {
+function drawTile(id, dx, dy, dw, dh, g) {
   const s = idSheet(id), t = idTile(id);
   const sh = meta.sheets[s];
   if (!sh || !sh.tiles[t]) return;
   const ti = sh.tiles[t];
-  ctx.drawImage(atlases[s], ti.x, ti.y, ti.w, ti.h, dx, dy, dw, dh);
+  const ratio = ti.w / ti.h;
+  if (ratio < 0.85 || ratio > 1.18) {
+    // 非正方形タイル(橋・崖パーツ等)はセル内でアスペクト維持、下端揃え
+    const k = Math.min(dw / ti.w, dh / ti.h);
+    const w = ti.w * k, h = ti.h * k;
+    (g || ctx).drawImage(atlases[s], ti.x, ti.y, ti.w, ti.h, dx + (dw - w) / 2, dy + (dh - h), w, h);
+  } else {
+    (g || ctx).drawImage(atlases[s], ti.x, ti.y, ti.w, ti.h, dx, dy, dw, dh);
+  }
 }
 
 function render() {
@@ -635,9 +643,7 @@ document.getElementById("mExportPng").addEventListener("click", () => {
     for (let y = 0; y < map.h; y++)
       for (let x = 0; x < map.w; x++) {
         const id = layer[y * map.w + x];
-        if (id < 0) continue;
-        const s = idSheet(id), ti = meta.sheets[s].tiles[idTile(id)];
-        g.drawImage(atlases[s], ti.x, ti.y, ti.w, ti.h, x * P, y * P, P, P);
+        if (id >= 0) drawTile(id, x * P, y * P, P, P, g);
       }
   }
   const k = P / TILE;
