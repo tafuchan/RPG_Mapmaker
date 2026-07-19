@@ -2,17 +2,25 @@
 /* RPG Map Maker — スマホ向けタイルマップドラフトツール */
 
 const TILE = 48;              // ワールド座標での1セルのpx
-const STORAGE_KEY = "rpgmapmaker_v1";
+const KEY_INDEX = "rpgmm_index_v2";
+const KEY_MAP = (id) => "rpgmm_map_" + id;
+const OLD_KEY = "rpgmapmaker_v1";
 const BG_LAYERS = ["bg1", "bg2", "bg3"];
+const TAP_MOVE_PX = 6;        // これ以上動いたらドラッグ扱い
+const PINCH_REVERT_MS = 300;  // 描画開始からこの時間内にピンチになったら描画を取り消す
+const LONGPRESS_MS = 500;
 
 let meta = null;              // tiles.json
 let atlases = [];             // HTMLImageElement per sheet
-let map = null;               // {w,h,layers:{bg1:[],bg2:[],bg3:[]},objects:[]}
+let index = null;             // {maps:[{id,name,w,h,updated,thumb}], last}
+let mapId = null;
+let map = null;               // {w,h,layers:{bg1:[],...},objects:[]}
 let view = { x: 0, y: 0, scale: 1 };
-let mode = "bg1";             // bg1|bg2|bg3|obj
-let tool = "pen";             // pen|fill|eraser|picker
-let sel = { sheet: 0, tile: 0 };   // パレット選択
-let selObj = -1;              // 選択中オブジェクトindex
+let mode = "bg1";
+let tool = "pen";             // pen|rect|fill|eraser|picker
+let sel = { sheet: 0, tile: 0 };
+let selObj = -1;
+let recent = [];              // [{s,t}]
 let showGrid = true;
 let dimOthers = false;
 let undoStack = [], redoStack = [];
@@ -20,9 +28,10 @@ const UNDO_MAX = 100;
 
 const canvas = document.getElementById("mapCanvas");
 const ctx = canvas.getContext("2d");
+const $ = (id) => document.getElementById(id);
 
-/* ---------------- map data ---------------- */
-function newMap(w, h) {
+/* ---------------- map data / storage ---------------- */
+function newMapData(w, h) {
   return {
     w, h,
     layers: { bg1: new Array(w * h).fill(-1), bg2: new Array(w * h).fill(-1), bg3: new Array(w * h).fill(-1) },
@@ -32,21 +41,73 @@ function newMap(w, h) {
 function tileId(s, t) { return s * 1000 + t; }
 function idSheet(id) { return Math.floor(id / 1000); }
 function idTile(id) { return id % 1000; }
+function genId() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
+
+function loadIndex() {
+  try {
+    const s = localStorage.getItem(KEY_INDEX);
+    if (s) return JSON.parse(s);
+  } catch (e) { console.warn(e); }
+  const idx = { maps: [], last: null, recent: [] };
+  // 旧形式からの移行
+  try {
+    const old = localStorage.getItem(OLD_KEY);
+    if (old) {
+      const m = JSON.parse(old);
+      if (m && m.w && m.layers) {
+        const id = genId();
+        idx.maps.push({ id, name: "マップ1", w: m.w, h: m.h, updated: Date.now(), thumb: null });
+        localStorage.setItem(KEY_MAP(id), old);
+        localStorage.removeItem(OLD_KEY);
+      }
+    }
+  } catch (e) { console.warn(e); }
+  return idx;
+}
+function saveIndex() {
+  index.recent = recent;
+  try { localStorage.setItem(KEY_INDEX, JSON.stringify(index)); } catch (e) { console.warn(e); }
+}
+function indexEntry() { return index.maps.find(m => m.id === mapId); }
 
 function saveLocal() {
   clearTimeout(saveLocal._t);
   saveLocal._t = setTimeout(() => {
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(map)); } catch (e) { console.warn(e); }
+    if (!map || !mapId) return;
+    try {
+      localStorage.setItem(KEY_MAP(mapId), JSON.stringify(map));
+      const e = indexEntry();
+      if (e) {
+        e.w = map.w; e.h = map.h; e.updated = Date.now();
+        e.thumb = makeThumb();
+      }
+      saveIndex();
+    } catch (e) { console.warn(e); }
   }, 600);
 }
-function loadLocal() {
+
+function makeThumb() {
   try {
-    const s = localStorage.getItem(STORAGE_KEY);
-    if (!s) return null;
-    const m = JSON.parse(s);
-    if (m && m.w && m.layers && m.layers.bg1) return m;
-  } catch (e) { console.warn(e); }
-  return null;
+    const P = 4;
+    const c = document.createElement("canvas");
+    c.width = map.w * P; c.height = map.h * P;
+    const g = c.getContext("2d");
+    g.fillStyle = "#101120"; g.fillRect(0, 0, c.width, c.height);
+    for (const lname of BG_LAYERS) {
+      const layer = map.layers[lname];
+      for (let y = 0; y < map.h; y++)
+        for (let x = 0; x < map.w; x++) {
+          const id = layer[y * map.w + x];
+          if (id >= 0) drawTile(id, x * P, y * P, P, P, g);
+        }
+    }
+    const k = P / TILE;
+    for (const o of map.objects) {
+      const d = objDrawRect(o);
+      drawTile(tileId(o.s, o.t), d.x * k, d.y * k, d.w * k, d.h * k, g);
+    }
+    return c.toDataURL("image/jpeg", 0.5);
+  } catch (e) { return null; }
 }
 
 /* ---------------- undo ---------------- */
@@ -56,12 +117,17 @@ function pushUndo(entry) {
   redoStack.length = 0;
   updateUndoButtons();
 }
-function applyEntry(e, dir) {   // dir: "undo"|"redo"
+function applyEntry(e, dir) {
   if (e.type === "cells") {
     for (const [i, before, after] of e.changes)
       map.layers[e.layer][i] = dir === "undo" ? before : after;
   } else if (e.type === "objects") {
     map.objects = JSON.parse(JSON.stringify(dir === "undo" ? e.before : e.after));
+    selObj = -1; hideObjToolbar();
+  } else if (e.type === "full") {
+    const s = dir === "undo" ? e.before : e.after;
+    map.layers = JSON.parse(JSON.stringify(s.layers));
+    map.objects = JSON.parse(JSON.stringify(s.objects));
     selObj = -1; hideObjToolbar();
   }
 }
@@ -78,10 +144,13 @@ function doRedo() {
   updateUndoButtons(); saveLocal(); render();
 }
 function updateUndoButtons() {
-  document.getElementById("undoBtn").disabled = undoStack.length === 0;
-  document.getElementById("redoBtn").disabled = redoStack.length === 0;
+  $("undoBtn").disabled = undoStack.length === 0;
+  $("redoBtn").disabled = redoStack.length === 0;
 }
 function objSnapshot() { return JSON.parse(JSON.stringify(map.objects)); }
+function fullSnapshot() {
+  return { layers: JSON.parse(JSON.stringify(map.layers)), objects: JSON.parse(JSON.stringify(map.objects)) };
+}
 
 /* ---------------- rendering ---------------- */
 function resizeCanvas() {
@@ -116,16 +185,13 @@ function render() {
   const sc = view.scale, ts = TILE * sc;
   const ox = -view.x * sc, oy = -view.y * sc;
 
-  // map background (checker)
   ctx.fillStyle = "#23253c";
   ctx.fillRect(ox, oy, map.w * ts, map.h * ts);
   ctx.fillStyle = "#282a44";
-  const step = ts;
   for (let y = 0; y < map.h; y++)
     for (let x = (y % 2); x < map.w; x += 2)
-      ctx.fillRect(ox + x * step, oy + y * step, step, step);
+      ctx.fillRect(ox + x * ts, oy + y * ts, ts, ts);
 
-  // visible cell range
   const x0 = Math.max(0, Math.floor((0 - ox) / ts)), x1 = Math.min(map.w - 1, Math.ceil((r.width - ox) / ts));
   const y0 = Math.max(0, Math.floor((0 - oy) / ts)), y1 = Math.min(map.h - 1, Math.ceil((r.height - oy) / ts));
 
@@ -134,16 +200,14 @@ function render() {
     const dim = dimOthers && mode !== "obj" && mode !== lname;
     ctx.globalAlpha = dim ? 0.3 : 1;
     const layer = map.layers[lname];
-    for (let y = y0; y <= y1; y++) {
+    for (let y = y0; y <= y1; y++)
       for (let x = x0; x <= x1; x++) {
         const id = layer[y * map.w + x];
         if (id >= 0) drawTile(id, ox + x * ts, oy + y * ts, ts + 0.6, ts + 0.6);
       }
-    }
   }
   ctx.globalAlpha = dimOthers && mode !== "obj" ? 0.5 : 1;
 
-  // objects
   for (let i = 0; i < map.objects.length; i++) {
     const o = map.objects[i];
     const d = objDrawRect(o);
@@ -158,7 +222,6 @@ function render() {
   }
   ctx.globalAlpha = 1;
 
-  // selection outline
   if (mode === "obj" && selObj >= 0 && map.objects[selObj]) {
     const d = objDrawRect(map.objects[selObj]);
     ctx.strokeStyle = "#ffb648"; ctx.lineWidth = 2; ctx.setLineDash([6, 4]);
@@ -166,7 +229,16 @@ function render() {
     ctx.setLineDash([]);
   }
 
-  // grid
+  // 四角塗りのプレビュー
+  if (rectSel) {
+    const ax = Math.min(rectSel.a.x, rectSel.b.x), ay = Math.min(rectSel.a.y, rectSel.b.y);
+    const bx = Math.max(rectSel.a.x, rectSel.b.x), by = Math.max(rectSel.a.y, rectSel.b.y);
+    ctx.fillStyle = tool === "eraser" ? "rgba(255,80,80,0.25)" : "rgba(91,140,255,0.30)";
+    ctx.fillRect(ox + ax * ts, oy + ay * ts, (bx - ax + 1) * ts, (by - ay + 1) * ts);
+    ctx.strokeStyle = "#ffb648"; ctx.lineWidth = 2;
+    ctx.strokeRect(ox + ax * ts, oy + ay * ts, (bx - ax + 1) * ts, (by - ay + 1) * ts);
+  }
+
   if (showGrid && ts >= 8) {
     ctx.strokeStyle = "rgba(255,255,255,0.10)"; ctx.lineWidth = 1;
     ctx.beginPath();
@@ -175,12 +247,10 @@ function render() {
     ctx.stroke();
   }
 
-  // map border
   ctx.strokeStyle = "#5b8cff88"; ctx.lineWidth = 2;
   ctx.strokeRect(ox, oy, map.w * ts, map.h * ts);
 }
 
-/* オブジェクトのワールド座標での描画矩形 */
 function objDrawRect(o) {
   const sh = meta.sheets[o.s], ti = sh.tiles[o.t];
   const base = TILE * o.scale / meta.tilePx;
@@ -192,33 +262,64 @@ function objDrawRect(o) {
 function screenToWorld(px, py) {
   return { x: px / view.scale + view.x, y: py / view.scale + view.y };
 }
-function worldToCell(w) {
-  return { x: Math.floor(w.x / TILE), y: Math.floor(w.y / TILE) };
-}
+function worldToCell(w) { return { x: Math.floor(w.x / TILE), y: Math.floor(w.y / TILE) }; }
 function inMap(c) { return c.x >= 0 && c.y >= 0 && c.x < map.w && c.y < map.h; }
+function clampCell(c) {
+  return { x: Math.max(0, Math.min(map.w - 1, c.x)), y: Math.max(0, Math.min(map.h - 1, c.y)) };
+}
 
 /* ---------------- painting ---------------- */
 let stroke = null;   // {layer, changes:Map(idx->[before,after]), lastCell}
+let rectSel = null;  // {a:cell, b:cell} 四角塗りプレビュー
 
+function beginStroke(c) {
+  stroke = { layer: mode, changes: new Map(), lastCell: c };
+  paintCell(c);
+}
 function paintCell(c) {
   if (!inMap(c)) return;
   const layer = map.layers[mode];
   const i = c.y * map.w + c.x;
-  let val;
-  if (tool === "pen") val = tileId(sel.sheet, sel.tile);
-  else if (tool === "eraser") val = -1;
-  else return;
+  const val = tool === "eraser" ? -1 : tileId(sel.sheet, sel.tile);
   if (layer[i] === val) return;
   if (!stroke.changes.has(i)) stroke.changes.set(i, [layer[i], val]);
   else stroke.changes.get(i)[1] = val;
   layer[i] = val;
 }
-
 function paintLine(c0, c1) {
-  const dx = Math.abs(c1.x - c0.x), dy = Math.abs(c1.y - c0.y);
-  const n = Math.max(dx, dy);
-  for (let i = 0; i <= n; i++) {
+  const n = Math.max(Math.abs(c1.x - c0.x), Math.abs(c1.y - c0.y));
+  for (let i = 0; i <= n; i++)
     paintCell({ x: Math.round(c0.x + (c1.x - c0.x) * i / (n || 1)), y: Math.round(c0.y + (c1.y - c0.y) * i / (n || 1)) });
+}
+function endStroke() {
+  if (stroke && stroke.changes.size) {
+    pushUndo({ type: "cells", layer: stroke.layer, changes: [...stroke.changes.entries()].map(([i, [b, a]]) => [i, b, a]) });
+    saveLocal();
+  }
+  stroke = null;
+}
+function revertStroke() {
+  if (stroke) {
+    for (const [i, [before]] of stroke.changes.entries())
+      map.layers[stroke.layer][i] = before;
+  }
+  stroke = null;
+}
+
+function commitRect(a, b) {
+  const ax = Math.max(0, Math.min(a.x, b.x)), ay = Math.max(0, Math.min(a.y, b.y));
+  const bx = Math.min(map.w - 1, Math.max(a.x, b.x)), by = Math.min(map.h - 1, Math.max(a.y, b.y));
+  const layer = map.layers[mode];
+  const val = tileId(sel.sheet, sel.tile);
+  const changes = [];
+  for (let y = ay; y <= by; y++)
+    for (let x = ax; x <= bx; x++) {
+      const i = y * map.w + x;
+      if (layer[i] !== val) { changes.push([i, layer[i], val]); layer[i] = val; }
+    }
+  if (changes.length) {
+    pushUndo({ type: "cells", layer: mode, changes });
+    saveLocal();
   }
 }
 
@@ -226,7 +327,7 @@ function floodFill(c) {
   if (!inMap(c)) return;
   const layer = map.layers[mode];
   const target = layer[c.y * map.w + c.x];
-  const val = tool === "eraser" ? -1 : tileId(sel.sheet, sel.tile);
+  const val = tileId(sel.sheet, sel.tile);
   if (target === val) return;
   const changes = [];
   const q = [c.y * map.w + c.x];
@@ -250,20 +351,37 @@ function floodFill(c) {
 }
 
 function pickTile(c) {
-  if (!inMap(c)) return;
+  if (!inMap(c)) return false;
   const i = c.y * map.w + c.x;
-  // 現在レイヤー優先、なければ上のレイヤーから順に
   const order = [mode, "bg3", "bg2", "bg1"].filter((v, k, a) => v !== "obj" && a.indexOf(v) === k);
   for (const l of order) {
     const id = map.layers[l][i];
     if (id >= 0) {
-      sel.sheet = idSheet(id); sel.tile = idTile(id);
+      selectTile(idSheet(id), idTile(id));
       buildPaletteTabs(); buildPaletteGrid();
-      setTool("pen");
-      return;
+      if (tool === "picker") setTool("pen");
+      return true;
     }
   }
+  return false;
 }
+
+/* ---------------- tile selection / recent ---------------- */
+function selectTile(s, t) {
+  sel.sheet = s; sel.tile = t;
+  recent = [{ s, t }, ...recent.filter(r => !(r.s === s && r.t === t))].slice(0, 16);
+  updateSelChip(); buildRecentRow(); saveIndex();
+}
+function tileBgStyle(el, s, t, cssPx) {
+  const sh = meta.sheets[s];
+  const col = t % sh.cols, row = Math.floor(t / sh.cols);
+  const rows = Math.ceil(sh.count / sh.cols);
+  el.style.backgroundImage = `url(${sh.file})`;
+  el.style.backgroundSize = `${sh.cols * 100}% ${rows * 100}%`;
+  el.style.backgroundPosition =
+    `${sh.cols > 1 ? (col * 100 / (sh.cols - 1)) : 0}% ${rows > 1 ? (row * 100 / (rows - 1)) : 0}%`;
+}
+function updateSelChip() { tileBgStyle($("selChip"), sel.sheet, sel.tile); }
 
 /* ---------------- objects ---------------- */
 function hitObject(w) {
@@ -289,7 +407,7 @@ function addObjectAtCenter() {
   saveLocal(); render(); showObjToolbar();
 }
 
-const objToolbar = document.getElementById("objToolbar");
+const objToolbar = $("objToolbar");
 function showObjToolbar() {
   if (selObj < 0 || !map.objects[selObj]) { hideObjToolbar(); return; }
   const d = objDrawRect(map.objects[selObj]);
@@ -314,32 +432,36 @@ function objAction(fn) {
   saveLocal(); render();
   if (selObj >= 0) showObjToolbar(); else hideObjToolbar();
 }
-document.getElementById("objDel").addEventListener("click", () => objAction(() => {
+$("objDel").addEventListener("click", () => objAction(() => {
   map.objects.splice(selObj, 1); selObj = -1;
 }));
-document.getElementById("objDup").addEventListener("click", () => objAction(() => {
+$("objDup").addEventListener("click", () => objAction(() => {
   const o = JSON.parse(JSON.stringify(map.objects[selObj]));
   o.x += TILE; o.y += TILE;
   map.objects.push(o); selObj = map.objects.length - 1;
 }));
-document.getElementById("objFlip").addEventListener("click", () => objAction(() => {
+$("objFlip").addEventListener("click", () => objAction(() => {
   map.objects[selObj].flip = !map.objects[selObj].flip;
 }));
-document.getElementById("objFront").addEventListener("click", () => objAction(() => {
+$("objFront").addEventListener("click", () => objAction(() => {
   const [o] = map.objects.splice(selObj, 1);
   map.objects.push(o); selObj = map.objects.length - 1;
 }));
-document.getElementById("objBack").addEventListener("click", () => objAction(() => {
+$("objBack").addEventListener("click", () => objAction(() => {
   const [o] = map.objects.splice(selObj, 1);
   map.objects.unshift(o); selObj = 0;
 }));
 
-/* ---------------- pointer input ---------------- */
-const pointers = new Map();   // id -> {x,y}
-let gesture = null;           // "paint" | "pan" | "pinch" | "objdrag" | "objpinch"
+/* ---------------- pointer input ----------------
+   タップ即描画はしない: 動き始めたら描画、タップは指を離した時に1マス。
+   ピンチ開始時は描画中でも取り消してズームに移行する。 */
+const pointers = new Map();
+let gesture = null;   // pending|paint|rect|pan|pinch|objdrag|objpinch|longpicked
+let down = null;      // {p, t, cell, world}
 let pinch0 = null;
 let objDrag0 = null;
-let objBefore = null;         // オブジェクト操作のundo用スナップショット
+let objBefore = null;
+let longPressT = null;
 
 function pdist() {
   const [a, b] = [...pointers.values()];
@@ -349,6 +471,7 @@ function pmid() {
   const [a, b] = [...pointers.values()];
   return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
 }
+function cancelLongPress() { clearTimeout(longPressT); longPressT = null; }
 
 canvas.addEventListener("pointerdown", (ev) => {
   try { canvas.setPointerCapture(ev.pointerId); } catch (e) { /* synthetic pointer等 */ }
@@ -358,6 +481,8 @@ canvas.addEventListener("pointerdown", (ev) => {
 
   if (pointers.size === 1) {
     const w = screenToWorld(p.x, p.y);
+    const c = worldToCell(w);
+    down = { p, t: performance.now(), cell: c, world: w };
     if (mode === "obj") {
       const hit = hitObject(w);
       if (hit >= 0) {
@@ -372,26 +497,36 @@ canvas.addEventListener("pointerdown", (ev) => {
       }
       render();
     } else {
-      const c = worldToCell(w);
-      if (tool === "fill") { floodFill(c); gesture = null; }
-      else if (tool === "picker") { pickTile(c); gesture = null; }
-      else {
-        gesture = "paint";
-        stroke = { layer: mode, changes: new Map(), lastCell: c };
-        paintCell(c); render();
-      }
+      gesture = "pending";
+      // 長押しスポイト
+      cancelLongPress();
+      longPressT = setTimeout(() => {
+        if (gesture === "pending" && pointers.size === 1) {
+          if (pickTile(down.cell)) {
+            gesture = "longpicked";
+            if (navigator.vibrate) navigator.vibrate(15);
+            showZoomHint("💧 タイルを取得");
+          }
+        }
+      }, LONGPRESS_MS);
     }
   } else if (pointers.size === 2) {
-    // 2本目: ピンチ開始。描画中ストロークは確定
-    if (gesture === "paint") endStroke();
+    cancelLongPress();
+    if (gesture === "paint") {
+      // 描画直後のピンチは誤操作: 取り消す。時間が経っていれば確定
+      if (performance.now() - down.t < PINCH_REVERT_MS) revertStroke();
+      else endStroke();
+    }
+    if (gesture === "rect") rectSel = null;
     if (mode === "obj" && gesture === "objdrag" && selObj >= 0) {
       gesture = "objpinch";
       pinch0 = { dist: pdist(), scale: map.objects[selObj].scale };
     } else {
       gesture = "pinch";
       const m = pmid();
-      pinch0 = { dist: pdist(), scale: view.scale, mid: m, world: screenToWorld(m.x, m.y) };
+      pinch0 = { dist: pdist(), scale: view.scale, world: screenToWorld(m.x, m.y) };
     }
+    render();
   }
 });
 
@@ -402,52 +537,86 @@ canvas.addEventListener("pointermove", (ev) => {
   const prev = pointers.get(ev.pointerId);
   pointers.set(ev.pointerId, p);
 
-  if (gesture === "paint" && pointers.size === 1) {
+  if (pointers.size === 1) {
     const c = worldToCell(screenToWorld(p.x, p.y));
-    if (c.x !== stroke.lastCell.x || c.y !== stroke.lastCell.y) {
-      paintLine(stroke.lastCell, c);
-      stroke.lastCell = c;
+    if (gesture === "pending") {
+      if (Math.hypot(p.x - down.p.x, p.y - down.p.y) > TAP_MOVE_PX) {
+        cancelLongPress();
+        if (tool === "pen" || tool === "eraser") {
+          gesture = "paint";
+          beginStroke(down.cell);
+          paintLine(down.cell, c);
+          stroke.lastCell = c;
+          render();
+        } else if (tool === "rect") {
+          gesture = "rect";
+          rectSel = { a: clampCell(down.cell), b: clampCell(c) };
+          render();
+        } else {
+          gesture = "pan";  // fill/pickerはドラッグでパン
+        }
+      }
+    } else if (gesture === "paint") {
+      if (c.x !== stroke.lastCell.x || c.y !== stroke.lastCell.y) {
+        paintLine(stroke.lastCell, c);
+        stroke.lastCell = c;
+        render();
+      }
+    } else if (gesture === "rect") {
+      rectSel.b = clampCell(c);
+      render();
+    } else if (gesture === "pan") {
+      view.x -= (p.x - prev.x) / view.scale;
+      view.y -= (p.y - prev.y) / view.scale;
+      render();
+    } else if (gesture === "objdrag" && selObj >= 0) {
+      const w = screenToWorld(p.x, p.y);
+      map.objects[selObj].x = w.x + objDrag0.ox;
+      map.objects[selObj].y = w.y + objDrag0.oy;
       render();
     }
-  } else if (gesture === "pan" && pointers.size === 1) {
-    view.x -= (p.x - prev.x) / view.scale;
-    view.y -= (p.y - prev.y) / view.scale;
-    render();
-  } else if (gesture === "objdrag" && pointers.size === 1 && selObj >= 0) {
-    const w = screenToWorld(p.x, p.y);
-    map.objects[selObj].x = w.x + objDrag0.ox;
-    map.objects[selObj].y = w.y + objDrag0.oy;
-    render();
-  } else if (gesture === "objpinch" && pointers.size === 2 && selObj >= 0) {
-    const s = Math.max(0.2, Math.min(10, pinch0.scale * pdist() / pinch0.dist));
-    map.objects[selObj].scale = s;
-    showZoomHint("×" + s.toFixed(2));
-    render();
-  } else if (gesture === "pinch" && pointers.size === 2) {
-    const m = pmid();
-    const sc = Math.max(0.15, Math.min(5, pinch0.scale * pdist() / pinch0.dist));
-    view.scale = sc;
-    view.x = pinch0.world.x - m.x / sc;
-    view.y = pinch0.world.y - m.y / sc;
-    showZoomHint(Math.round(sc * 100) + "%");
-    render();
+  } else if (pointers.size === 2) {
+    if (gesture === "objpinch" && selObj >= 0) {
+      const s = Math.max(0.2, Math.min(10, pinch0.scale * pdist() / pinch0.dist));
+      map.objects[selObj].scale = s;
+      showZoomHint("×" + s.toFixed(2));
+      render();
+    } else if (gesture === "pinch") {
+      const m = pmid();
+      const sc = Math.max(0.15, Math.min(5, pinch0.scale * pdist() / pinch0.dist));
+      view.scale = sc;
+      view.x = pinch0.world.x - m.x / sc;
+      view.y = pinch0.world.y - m.y / sc;
+      showZoomHint(Math.round(sc * 100) + "%");
+      render();
+    }
   }
 });
-
-function endStroke() {
-  if (stroke && stroke.changes.size) {
-    pushUndo({ type: "cells", layer: stroke.layer, changes: [...stroke.changes.entries()].map(([i, [b, a]]) => [i, b, a]) });
-    saveLocal();
-  }
-  stroke = null;
-}
 
 function pointerEnd(ev) {
   if (!pointers.has(ev.pointerId)) return;
   pointers.delete(ev.pointerId);
+  cancelLongPress();
   if (pointers.size === 0) {
-    if (gesture === "paint") endStroke();
-    if ((gesture === "objdrag" || gesture === "objpinch") && objBefore) {
+    if (gesture === "pending") {
+      // タップ確定
+      const c = down.cell;
+      if (tool === "pen" || tool === "eraser") {
+        beginStroke(c); endStroke(); render();
+      } else if (tool === "rect") {
+        commitRect(c, c); render();
+      } else if (tool === "fill") {
+        floodFill(c);
+      } else if (tool === "picker") {
+        pickTile(c);
+      }
+    } else if (gesture === "paint") {
+      endStroke();
+    } else if (gesture === "rect") {
+      const r = rectSel; rectSel = null;
+      if (r) commitRect(r.a, r.b);
+      render();
+    } else if ((gesture === "objdrag" || gesture === "objpinch") && objBefore) {
       const after = objSnapshot();
       if (JSON.stringify(after) !== JSON.stringify(objBefore))
         pushUndo({ type: "objects", before: objBefore, after });
@@ -455,15 +624,15 @@ function pointerEnd(ev) {
       saveLocal();
     }
     if (mode === "obj" && selObj >= 0) showObjToolbar();
-    gesture = null; pinch0 = null;
+    gesture = null; pinch0 = null; down = null;
   } else if (pointers.size === 1) {
-    // ピンチ後に1本残った → パンに移行
-    gesture = (mode === "obj" && gesture === "objpinch") ? "pan" : "pan";
-    if (gesture === "pan" && mode === "obj") { /* keep selection */ }
+    // ピンチから1本残り → パンへ(オブジェクト選択は維持)
+    gesture = "pan";
   }
 }
 canvas.addEventListener("pointerup", pointerEnd);
 canvas.addEventListener("pointercancel", pointerEnd);
+canvas.addEventListener("contextmenu", (e) => e.preventDefault());
 
 /* desktop: ホイールズーム */
 canvas.addEventListener("wheel", (ev) => {
@@ -481,7 +650,7 @@ canvas.addEventListener("wheel", (ev) => {
 
 let zoomHintT = null;
 function showZoomHint(text) {
-  const el = document.getElementById("zoomHint");
+  const el = $("zoomHint");
   el.textContent = text;
   el.classList.remove("hidden");
   clearTimeout(zoomHintT);
@@ -494,10 +663,9 @@ document.querySelectorAll(".mode-tab").forEach(b => {
     mode = b.dataset.mode;
     document.querySelectorAll(".mode-tab").forEach(x => x.classList.toggle("active", x === b));
     selObj = -1; hideObjToolbar();
-    document.getElementById("toolbar").querySelectorAll(".tool").forEach(t => {
-      t.style.display = (mode === "obj" && t.dataset.tool !== "pen") ? "none" : "";
+    document.querySelectorAll("#toolbar .tool").forEach(t => {
+      t.style.display = mode === "obj" ? "none" : "";
     });
-    if (mode === "obj") setTool("pen");
     render();
   });
 });
@@ -507,52 +675,44 @@ function setTool(t) {
   document.querySelectorAll(".tool").forEach(b => b.classList.toggle("active", b.dataset.tool === t));
 }
 document.querySelectorAll(".tool").forEach(b => b.addEventListener("click", () => setTool(b.dataset.tool)));
-document.getElementById("undoBtn").addEventListener("click", doUndo);
-document.getElementById("redoBtn").addEventListener("click", doRedo);
-document.getElementById("gridBtn").addEventListener("click", (e) => {
-  showGrid = !showGrid; e.currentTarget.classList.toggle("active", showGrid); render();
+$("undoBtn").addEventListener("click", doUndo);
+$("redoBtn").addEventListener("click", doRedo);
+$("fitBtn").addEventListener("click", () => { fitView(); render(); });
+$("selChip").addEventListener("click", () => {
+  const p = $("palette");
+  if (p.classList.contains("collapsed")) togglePalette();
 });
-document.getElementById("dimBtn").addEventListener("click", (e) => {
-  dimOthers = !dimOthers; e.currentTarget.classList.toggle("active", dimOthers); render();
-});
-document.getElementById("paletteToggle").addEventListener("click", (e) => {
-  const p = document.getElementById("palette");
+$("paletteToggle").addEventListener("click", togglePalette);
+function togglePalette() {
+  const p = $("palette");
   p.classList.toggle("collapsed");
-  e.currentTarget.textContent = p.classList.contains("collapsed") ? "▲" : "▼";
+  $("paletteToggle").textContent = p.classList.contains("collapsed") ? "▲" : "▼";
   setTimeout(resizeCanvas, 220);
-});
+}
 
 /* ---------------- palette ---------------- */
 function buildPaletteTabs() {
-  const tabs = document.getElementById("paletteTabs");
+  const tabs = $("paletteTabs");
   tabs.innerHTML = "";
   meta.sheets.forEach((sh, i) => {
     const b = document.createElement("button");
     b.textContent = sh.label;
     b.classList.toggle("active", i === sel.sheet);
-    b.addEventListener("click", () => { sel.sheet = i; sel.tile = 0; buildPaletteTabs(); buildPaletteGrid(); });
+    b.addEventListener("click", () => { sel.sheet = i; sel.tile = 0; updateSelChip(); buildPaletteTabs(); buildPaletteGrid(); });
     tabs.appendChild(b);
   });
 }
 
 function buildPaletteGrid() {
-  const grid = document.getElementById("paletteGrid");
+  const grid = $("paletteGrid");
   grid.innerHTML = "";
   const sh = meta.sheets[sel.sheet];
-  const P = meta.tilePx;
   for (let t = 0; t < sh.count; t++) {
     const b = document.createElement("button");
     b.className = "tile-btn" + (t === sel.tile ? " selected" : "");
-    const ti = sh.tiles[t];
-    const col = t % sh.cols, row = Math.floor(t / sh.cols);
-    b.style.backgroundImage = `url(${sh.file})`;
-    const cell = 46; // css px基準(background-sizeを%で指定して自動スケール)
-    const rows = Math.ceil(sh.count / sh.cols);
-    b.style.backgroundSize = `${sh.cols * 100}% ${rows * 100}%`;
-    b.style.backgroundPosition = `${sh.cols > 1 ? (col * 100 / (sh.cols - 1)) : 0}% ${rows > 1 ? (row * 100 / (rows - 1)) : 0}%`;
+    tileBgStyle(b, sel.sheet, t);
     b.addEventListener("click", () => {
-      const prev = sel.tile;
-      sel.tile = t;
+      selectTile(sel.sheet, t);
       grid.querySelectorAll(".tile-btn").forEach((x, k) => x.classList.toggle("selected", k === t));
       if (mode === "obj") addObjectAtCenter();
       else if (tool === "eraser" || tool === "picker") setTool("pen");
@@ -561,71 +721,243 @@ function buildPaletteGrid() {
   }
 }
 
+function buildRecentRow() {
+  const row = $("recentRow"), box = $("recentTiles");
+  if (!recent.length) { row.classList.add("hidden"); return; }
+  row.classList.remove("hidden");
+  box.innerHTML = "";
+  for (const rt of recent) {
+    if (!meta.sheets[rt.s] || rt.t >= meta.sheets[rt.s].count) continue;
+    const b = document.createElement("button");
+    b.className = "tile-btn" + (rt.s === sel.sheet && rt.t === sel.tile ? " selected" : "");
+    tileBgStyle(b, rt.s, rt.t);
+    b.addEventListener("click", () => {
+      sel.sheet = rt.s;
+      selectTile(rt.s, rt.t);
+      buildPaletteTabs(); buildPaletteGrid();
+      if (mode === "obj") addObjectAtCenter();
+      else if (tool === "eraser" || tool === "picker") setTool("pen");
+    });
+    box.appendChild(b);
+  }
+}
+
+/* ---------------- map list ---------------- */
+function fmtDate(t) {
+  const d = new Date(t);
+  return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+function showMapList() {
+  saveIndex();
+  buildMapList();
+  $("mapListPanel").classList.remove("hidden");
+}
+
+function buildMapList() {
+  const list = $("mapList");
+  list.innerHTML = "";
+  if (!index.maps.length) {
+    const p = document.createElement("p");
+    p.className = "empty-note";
+    p.textContent = "マップがありません。「＋ マップを追加」から作成してください。";
+    list.appendChild(p);
+    return;
+  }
+  const sorted = [...index.maps].sort((a, b) => b.updated - a.updated);
+  for (const m of sorted) {
+    const item = document.createElement("div");
+    item.className = "map-item";
+    const img = document.createElement("img");
+    img.className = "thumb";
+    if (m.thumb) img.src = m.thumb;
+    img.alt = "";
+    const info = document.createElement("div");
+    info.className = "info";
+    info.innerHTML = `<div class="name"></div><div class="sub">${m.w}×${m.h} ・ ${fmtDate(m.updated)}</div>`;
+    info.querySelector(".name").textContent = m.name;
+    const acts = document.createElement("div");
+    acts.className = "acts";
+    const mk = (label, title, fn) => {
+      const b = document.createElement("button");
+      b.textContent = label; b.title = title;
+      b.addEventListener("click", (e) => { e.stopPropagation(); fn(); });
+      acts.appendChild(b);
+    };
+    mk("✎", "名前変更", () => openDialog({
+      title: "名前を変更", name: m.name, showSize: false,
+      cb: ({ name }) => { m.name = name || m.name; saveIndex(); buildMapList(); }
+    }));
+    mk("⧉", "複製", () => {
+      const id = genId();
+      const data = localStorage.getItem(KEY_MAP(m.id));
+      if (data) localStorage.setItem(KEY_MAP(id), data);
+      index.maps.push({ ...m, id, name: m.name + " コピー", updated: Date.now() });
+      saveIndex(); buildMapList();
+    });
+    mk("🗑", "削除", () => {
+      if (!confirm(`「${m.name}」を削除します。よろしいですか?`)) return;
+      index.maps = index.maps.filter(x => x.id !== m.id);
+      localStorage.removeItem(KEY_MAP(m.id));
+      if (index.last === m.id) index.last = null;
+      saveIndex(); buildMapList();
+    });
+    item.appendChild(img); item.appendChild(info); item.appendChild(acts);
+    item.addEventListener("click", () => openMap(m.id));
+    list.appendChild(item);
+  }
+}
+
+function openMap(id) {
+  const e = index.maps.find(m => m.id === id);
+  if (!e) return;
+  let data = null;
+  try { data = JSON.parse(localStorage.getItem(KEY_MAP(id))); } catch (err) { /* noop */ }
+  map = (data && data.w && data.layers) ? data : newMapData(e.w, e.h);
+  if (!map.objects) map.objects = [];
+  mapId = id;
+  index.last = id;
+  saveIndex();
+  undoStack.length = 0; redoStack.length = 0; updateUndoButtons();
+  selObj = -1; hideObjToolbar();
+  $("mapListPanel").classList.add("hidden");
+  resizeCanvas(); fitView(); render();
+}
+
+function createMap(name, w, h) {
+  const id = genId();
+  index.maps.push({ id, name: name || `マップ${index.maps.length + 1}`, w, h, updated: Date.now(), thumb: null });
+  localStorage.setItem(KEY_MAP(id), JSON.stringify(newMapData(w, h)));
+  saveIndex();
+  openMap(id);
+}
+
+$("listBtn").addEventListener("click", showMapList);
+$("addMapBtn").addEventListener("click", () => openDialog({
+  title: "新しいマップ", name: `マップ${index.maps.length + 1}`, showSize: true,
+  cb: ({ name, w, h }) => createMap(name, w, h)
+}));
+
+/* ---------------- dialog ---------------- */
+let dlgCb = null;
+function openDialog({ title, name = "", w = 32, h = 32, showName = true, showSize = true, cb }) {
+  $("dlgTitle").textContent = title;
+  $("dlgName").value = name;
+  $("dlgW").value = w; $("dlgH").value = h;
+  $("dlgNameRow").classList.toggle("hidden", !showName);
+  $("dlgSizeRow").classList.toggle("hidden", !showSize);
+  dlgCb = cb;
+  $("mapDialog").classList.remove("hidden");
+}
+$("dlgOk").addEventListener("click", () => {
+  const clamp = (v, d) => { const n = parseInt(v, 10); return isNaN(n) ? d : Math.max(8, Math.min(100, n)); };
+  const res = { name: $("dlgName").value.trim(), w: clamp($("dlgW").value, 32), h: clamp($("dlgH").value, 32) };
+  $("mapDialog").classList.add("hidden");
+  if (dlgCb) dlgCb(res);
+  dlgCb = null;
+});
+$("dlgCancel").addEventListener("click", () => { $("mapDialog").classList.add("hidden"); dlgCb = null; });
+
 /* ---------------- menu ---------------- */
-const menuPanel = document.getElementById("menuPanel");
-document.getElementById("menuBtn").addEventListener("click", () => {
-  document.getElementById("mapInfo").textContent =
-    `マップ: ${map.w}×${map.h} / オブジェクト: ${map.objects.length}個`;
+const menuPanel = $("menuPanel");
+$("menuBtn").addEventListener("click", () => {
+  const e = indexEntry();
+  $("mapInfo").textContent =
+    `${e ? e.name : ""}: ${map.w}×${map.h} / オブジェクト ${map.objects.length}個`;
   menuPanel.classList.remove("hidden");
 });
-document.getElementById("mClose").addEventListener("click", () => menuPanel.classList.add("hidden"));
+$("mClose").addEventListener("click", () => menuPanel.classList.add("hidden"));
 menuPanel.addEventListener("click", (e) => { if (e.target === menuPanel) menuPanel.classList.add("hidden"); });
 
-document.getElementById("mHelp").addEventListener("click", () => {
+$("mHelp").addEventListener("click", () => {
   menuPanel.classList.add("hidden");
-  document.getElementById("helpPanel").classList.remove("hidden");
+  $("helpPanel").classList.remove("hidden");
 });
-document.getElementById("hClose").addEventListener("click", () => document.getElementById("helpPanel").classList.add("hidden"));
+$("hClose").addEventListener("click", () => $("helpPanel").classList.add("hidden"));
 
-document.getElementById("mNew").addEventListener("click", () => {
-  if (!confirm("マップを全て消去して新規作成します。よろしいですか?")) return;
-  const w = parseInt(prompt("マップの幅(セル数, 8〜100)", map.w), 10) || map.w;
-  const h = parseInt(prompt("マップの高さ(セル数, 8〜100)", map.h), 10) || map.h;
-  map = newMap(clampSize(w), clampSize(h));
-  undoStack.length = 0; redoStack.length = 0; updateUndoButtons();
-  fitView(); saveLocal(); render();
-  menuPanel.classList.add("hidden");
+$("mGrid").addEventListener("click", () => {
+  showGrid = !showGrid;
+  $("mGridState").textContent = showGrid ? "ON" : "OFF";
+  render();
+});
+$("mDim").addEventListener("click", () => {
+  dimOthers = !dimOthers;
+  $("mDimState").textContent = dimOthers ? "ON" : "OFF";
+  render();
 });
 
-document.getElementById("mResize").addEventListener("click", () => {
-  const w = parseInt(prompt("新しい幅(セル数, 8〜100)", map.w), 10);
-  const h = parseInt(prompt("新しい高さ(セル数, 8〜100)", map.h), 10);
-  if (!w || !h) return;
-  const nw = clampSize(w), nh = clampSize(h);
-  const nm = newMap(nw, nh);
-  for (const l of BG_LAYERS)
-    for (let y = 0; y < Math.min(map.h, nh); y++)
-      for (let x = 0; x < Math.min(map.w, nw); x++)
-        nm.layers[l][y * nw + x] = map.layers[l][y * map.w + x];
-  nm.objects = map.objects;
-  map = nm;
-  undoStack.length = 0; redoStack.length = 0; updateUndoButtons();
+$("mClearLayer").addEventListener("click", () => {
+  const label = mode === "obj" ? "オブジェクトレイヤー" : { bg1: "背景1", bg2: "背景2", bg3: "背景3" }[mode];
+  if (!confirm(`${label}を一括クリアします。よろしいですか?`)) return;
+  if (mode === "obj") {
+    const before = objSnapshot();
+    map.objects = [];
+    selObj = -1; hideObjToolbar();
+    pushUndo({ type: "objects", before, after: [] });
+  } else {
+    const layer = map.layers[mode];
+    const changes = [];
+    for (let i = 0; i < layer.length; i++)
+      if (layer[i] >= 0) { changes.push([i, layer[i], -1]); layer[i] = -1; }
+    if (changes.length) pushUndo({ type: "cells", layer: mode, changes });
+  }
   saveLocal(); render();
   menuPanel.classList.add("hidden");
 });
-function clampSize(v) { return Math.max(8, Math.min(100, v)); }
 
-document.getElementById("mExportJson").addEventListener("click", () => {
-  const blob = new Blob([JSON.stringify(map)], { type: "application/json" });
-  downloadBlob(blob, "rpgmap.json");
+$("mClearAll").addEventListener("click", () => {
+  if (!confirm("背景1〜3とオブジェクトを全て消去します。よろしいですか?")) return;
+  const before = fullSnapshot();
+  for (const l of BG_LAYERS) map.layers[l].fill(-1);
+  map.objects = [];
+  selObj = -1; hideObjToolbar();
+  pushUndo({ type: "full", before, after: fullSnapshot() });
+  saveLocal(); render();
   menuPanel.classList.add("hidden");
 });
 
-document.getElementById("mImportJson").addEventListener("click", () => {
-  document.getElementById("fileInput").click();
+$("mResize").addEventListener("click", () => {
+  menuPanel.classList.add("hidden");
+  openDialog({
+    title: "マップサイズ変更", showName: false, w: map.w, h: map.h,
+    cb: ({ w, h }) => {
+      const nm = newMapData(w, h);
+      for (const l of BG_LAYERS)
+        for (let y = 0; y < Math.min(map.h, h); y++)
+          for (let x = 0; x < Math.min(map.w, w); x++)
+            nm.layers[l][y * w + x] = map.layers[l][y * map.w + x];
+      nm.objects = map.objects;
+      map = nm;
+      undoStack.length = 0; redoStack.length = 0; updateUndoButtons();
+      saveLocal(); render();
+    }
+  });
 });
-document.getElementById("fileInput").addEventListener("change", (e) => {
+
+$("mExportJson").addEventListener("click", () => {
+  const e = indexEntry();
+  const blob = new Blob([JSON.stringify({ name: e ? e.name : "map", ...map })], { type: "application/json" });
+  downloadBlob(blob, (e && e.name ? e.name : "rpgmap") + ".json");
+  menuPanel.classList.add("hidden");
+});
+
+$("mImportJson").addEventListener("click", () => $("fileInput").click());
+$("fileInput").addEventListener("change", (e) => {
   const f = e.target.files[0];
   if (!f) return;
   const rd = new FileReader();
   rd.onload = () => {
     try {
       const m = JSON.parse(rd.result);
-      if (!m.w || !m.layers) throw new Error("bad format");
-      map = m;
-      if (!map.objects) map.objects = [];
-      undoStack.length = 0; redoStack.length = 0; updateUndoButtons();
-      fitView(); saveLocal(); render();
+      if (!m.w || !m.layers) throw new Error("形式が違います");
+      const id = genId();
+      const name = m.name || f.name.replace(/\.json$/i, "") || "インポート";
+      delete m.name;
+      if (!m.objects) m.objects = [];
+      localStorage.setItem(KEY_MAP(id), JSON.stringify(m));
+      index.maps.push({ id, name, w: m.w, h: m.h, updated: Date.now(), thumb: null });
+      saveIndex();
+      openMap(id);
       menuPanel.classList.add("hidden");
     } catch (err) { alert("読み込みに失敗しました: " + err.message); }
   };
@@ -633,7 +965,7 @@ document.getElementById("fileInput").addEventListener("change", (e) => {
   e.target.value = "";
 });
 
-document.getElementById("mExportPng").addEventListener("click", () => {
+$("mExportPng").addEventListener("click", () => {
   const P = meta.tilePx;
   const c = document.createElement("canvas");
   c.width = map.w * P; c.height = map.h * P;
@@ -649,15 +981,16 @@ document.getElementById("mExportPng").addEventListener("click", () => {
   const k = P / TILE;
   for (const o of map.objects) {
     const d = objDrawRect(o);
-    const s = o.s, ti = meta.sheets[s].tiles[o.t];
+    const ti = meta.sheets[o.s].tiles[o.t];
     g.save();
     if (o.flip) {
       g.translate((d.x + d.w / 2) * k, 0); g.scale(-1, 1); g.translate(-(d.x + d.w / 2) * k, 0);
     }
-    g.drawImage(atlases[s], ti.x, ti.y, ti.w, ti.h, d.x * k, d.y * k, d.w * k, d.h * k);
+    g.drawImage(atlases[o.s], ti.x, ti.y, ti.w, ti.h, d.x * k, d.y * k, d.w * k, d.h * k);
     g.restore();
   }
-  c.toBlob((blob) => downloadBlob(blob, "rpgmap.png"), "image/png");
+  const e = indexEntry();
+  c.toBlob((blob) => downloadBlob(blob, (e && e.name ? e.name : "rpgmap") + ".png"), "image/png");
   menuPanel.classList.add("hidden");
 });
 
@@ -673,6 +1006,7 @@ function downloadBlob(blob, name) {
 /* ---------------- init ---------------- */
 function fitView() {
   const r = canvas.getBoundingClientRect();
+  if (!map || !r.width) return;
   const sc = Math.min(r.width / (map.w * TILE), r.height / (map.h * TILE)) * 0.95;
   view.scale = Math.max(0.15, Math.min(2, sc));
   view.x = (map.w * TILE - r.width / view.scale) / 2;
@@ -688,19 +1022,19 @@ async function init() {
     im.onerror = ng;
     im.src = sh.file;
   })));
-  map = loadLocal() || newMap(32, 32);
-  if (!map.objects) map.objects = [];
+  index = loadIndex();
+  recent = (index.recent || []).filter(r => meta.sheets[r.s] && r.t < meta.sheets[r.s].count);
   buildPaletteTabs();
   buildPaletteGrid();
+  buildRecentRow();
+  updateSelChip();
   updateUndoButtons();
-  document.getElementById("loading").remove();
-  resizeCanvas();
-  fitView();
-  render();
+  $("loading").remove();
+  showMapList();   // 起動時はマップ一覧から
 }
 
-new ResizeObserver(() => resizeCanvas()).observe(document.getElementById("canvasWrap"));
+new ResizeObserver(() => resizeCanvas()).observe($("canvasWrap"));
 window.addEventListener("orientationchange", () => setTimeout(resizeCanvas, 300));
 init().catch(e => {
-  document.getElementById("loading").textContent = "読み込みエラー: " + e.message;
+  $("loading").textContent = "読み込みエラー: " + e.message;
 });

@@ -15,6 +15,7 @@
 <body>
 <div id="app">
   <header id="topbar">
+    <button id="listBtn" title="マップ一覧">📋</button>
     <div id="modeTabs">
       <button class="mode-tab active" data-mode="bg1">背景1</button>
       <button class="mode-tab" data-mode="bg2">背景2</button>
@@ -38,22 +39,54 @@
 
   <div id="toolbar">
     <button class="tool active" data-tool="pen" title="ペン">✏️</button>
+    <button class="tool" data-tool="rect" title="四角塗り">▦</button>
     <button class="tool" data-tool="fill" title="塗りつぶし">🪣</button>
     <button class="tool" data-tool="eraser" title="消しゴム">🧽</button>
-    <button class="tool" data-tool="picker" title="スポイト">💧</button>
+    <button class="tool" data-tool="picker" title="スポイト(長押しでも可)">💧</button>
     <span class="sep"></span>
     <button id="undoBtn" title="元に戻す">↩</button>
     <button id="redoBtn" title="やり直す">↪</button>
     <span class="sep"></span>
-    <button id="gridBtn" class="active" title="グリッド表示">#</button>
-    <button id="dimBtn" title="他レイヤーを暗く">◐</button>
+    <button id="fitBtn" title="全体表示">⛶</button>
+    <div id="selChip" title="選択中のタイル"></div>
     <span class="spacer"></span>
     <button id="paletteToggle" title="パレット開閉">▼</button>
   </div>
 
   <div id="palette">
+    <div id="recentRow" class="hidden">
+      <span class="recent-label">最近</span>
+      <div id="recentTiles"></div>
+    </div>
     <div id="paletteTabs"></div>
     <div id="paletteGrid"></div>
+  </div>
+
+  <!-- マップ一覧 -->
+  <div id="mapListPanel">
+    <div class="list-inner">
+      <h2>🗺 RPG Map Maker</h2>
+      <div id="mapList"></div>
+      <button id="addMapBtn" class="primary">＋ マップを追加</button>
+    </div>
+  </div>
+
+  <!-- マップ作成/名前変更/サイズ変更ダイアログ -->
+  <div id="mapDialog" class="hidden">
+    <div class="menu-inner">
+      <h3 id="dlgTitle">新しいマップ</h3>
+      <label id="dlgNameRow">名前 <input type="text" id="dlgName" maxlength="24" placeholder="マップ名"></label>
+      <div id="dlgSizeRow" class="size-row">
+        <label>横 <input type="number" id="dlgW" min="8" max="100" value="32" inputmode="numeric"></label>
+        <span>×</span>
+        <label>縦 <input type="number" id="dlgH" min="8" max="100" value="32" inputmode="numeric"></label>
+        <span>マス</span>
+      </div>
+      <div class="dlg-btns">
+        <button id="dlgCancel" class="secondary">キャンセル</button>
+        <button id="dlgOk" class="primary">OK</button>
+      </div>
+    </div>
   </div>
 
   <div id="menuPanel" class="hidden">
@@ -61,9 +94,12 @@
       <h3>メニュー</h3>
       <button id="mExportPng">🖼 PNG画像を書き出し</button>
       <button id="mExportJson">💾 マップデータ(JSON)を書き出し</button>
-      <button id="mImportJson">📂 マップデータを読み込み</button>
+      <button id="mImportJson">📂 JSONを読み込み(新規マップ)</button>
       <button id="mResize">📐 マップサイズ変更</button>
-      <button id="mNew">🗒 新規マップ(全消去)</button>
+      <button id="mClearLayer">🧹 このレイヤーを一括クリア</button>
+      <button id="mClearAll">🗑 マップ全体を一括クリア</button>
+      <button id="mGrid">グリッド表示: <span id="mGridState">ON</span></button>
+      <button id="mDim">他レイヤーを暗く: <span id="mDimState">OFF</span></button>
       <button id="mHelp">❓ 使い方</button>
       <button id="mClose" class="secondary">閉じる</button>
       <p id="mapInfo"></p>
@@ -75,11 +111,13 @@
       <h3>使い方</h3>
       <ul>
         <li><b>背景1〜3</b>: タイルを塗るレイヤー。1が最背面。</li>
-        <li><b>オブジェ</b>: タイルを自由な位置に置くレイヤー。タップで選択、ドラッグで移動、<b>2本指ピンチで拡大縮小</b>。</li>
-        <li>背景モード: 1本指で描画、<b>2本指でパン・ズーム</b>。</li>
-        <li>🪣塗りつぶし: 同じタイルの領域を一括で塗る。</li>
-        <li>💧スポイト: タップした場所のタイルを選択。</li>
-        <li>データは自動保存されます(この端末のブラウザ内)。</li>
+        <li><b>オブジェ</b>: タイルを自由な位置に置く。タップで選択、ドラッグで移動、<b>2本指ピンチで拡大縮小</b>。</li>
+        <li>背景モード: 1本指でなぞって描画、<b>2本指でパン・ズーム</b>。</li>
+        <li>▦ 四角塗り: 斜めにドラッグした範囲を一括で塗る。</li>
+        <li>🪣 塗りつぶし: 同じタイルの領域をまとめて塗る。</li>
+        <li>💧 スポイト: タップした場所のタイルを選択。<b>マップを長押し</b>でもスポイトになる。</li>
+        <li>⛶ で全体表示に戻る。</li>
+        <li>データは自動保存。📋からマップの追加・切替・複製・削除。</li>
       </ul>
       <button id="hClose" class="secondary">閉じる</button>
     </div>
