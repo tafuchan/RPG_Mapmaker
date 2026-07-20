@@ -68,6 +68,32 @@
       <h2>🗺 RPG Map Maker</h2>
       <div id="mapList"></div>
       <button id="addMapBtn" class="primary">＋ マップを追加</button>
+      <button id="listTips" class="secondary">💡 マップ作りのコツ</button>
+    </div>
+  </div>
+
+  <!-- マップ作りのコツ -->
+  <div id="tipsPanel" class="hidden">
+    <div class="menu-inner tips-inner">
+      <h3>💡 マップ作りのコツ</h3>
+      <h4>1. 「大 → 小」の順で作る</h4>
+      <p class="tip">①ベースの地面を全面に塗る(🪣) → ②水・崖など大きな地形 → ③道 → ④目印になる物 → ⑤細部の飾り。最初から細部を作ると行き当たりばったりになりがち。</p>
+      <h4>2. レイヤーの使い分け</h4>
+      <p class="tip">背景1=地面のベース。背景2=道・地面の変化・模様。背景3=上に重なる草や縁。オブジェ=階段・橋・岩など「置き物」。この分担にしておくと後から直しやすい。</p>
+      <h4>3. 動線を1本決める</h4>
+      <p class="tip">入口と出口を決めて、主要な道を1本通す。道はプレイヤーの視線誘導になる。分岐を作るなら、行き止まりの先には「ご褒美」(宝箱・きれいな景色)を。</p>
+      <h4>4. ランドマークを1つ</h4>
+      <p class="tip">どこにいるか一目で分かる目印(大木・塔・噴水・滝)を1つ、中心か少しずらした位置に。マップの「顔」になる。</p>
+      <h4>5. 埋めすぎない(7:3)</h4>
+      <p class="tip">歩ける空間7割・飾り3割くらいが目安。同じタイルが続く場所には1〜2割だけ別バリエーションを混ぜると単調にならない。</p>
+      <h4>6. 自然は曲線、人工物は直線</h4>
+      <p class="tip">川・崖・森の境界はわざと曲げてギザギザに。道・広場・建物は直線と直角に。これだけで「それっぽさ」が大きく変わる。</p>
+      <h4>7. 外周を閉じる</h4>
+      <p class="tip">マップの端は水・崖・木など「通れない地形」で囲むと世界が締まって見える。</p>
+      <h4>8. 広い⇔狭いのリズム</h4>
+      <p class="tip">広場の後は細い道、明るい場所の後は暗い場所。対比があると探索が楽しくなる。</p>
+      <p class="tip">…新規マップの「テンプレート」を選ぶと、この型に沿った下地が自動生成されます。まず湖畔や村から始めて、上に手を入れるのがおすすめ。</p>
+      <button id="tClose" class="secondary">閉じる</button>
     </div>
   </div>
 
@@ -81,6 +107,10 @@
         <span>×</span>
         <label>縦 <input type="number" id="dlgH" min="8" max="100" value="32" inputmode="numeric"></label>
         <span>マス</span>
+      </div>
+      <div id="dlgTplRow">
+        <div class="tpl-label">テンプレート(下地を自動生成)</div>
+        <div id="dlgTpls"></div>
       </div>
       <div class="dlg-btns">
         <button id="dlgCancel" class="secondary">キャンセル</button>
@@ -101,6 +131,7 @@
       <button id="mSheets">🧩 追加タイルシートの管理</button>
       <button id="mGrid">グリッド表示: <span id="mGridState">ON</span></button>
       <button id="mDim">他レイヤーを暗く: <span id="mDimState">OFF</span></button>
+      <button id="mTips">💡 マップ作りのコツ</button>
       <button id="mHelp">❓ 使い方</button>
       <button id="mClose" class="secondary">閉じる</button>
       <p id="mapInfo"></p>

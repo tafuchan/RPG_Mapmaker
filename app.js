@@ -1026,6 +1026,132 @@ $("mSheets").addEventListener("click", () => {
 $("sAdd").addEventListener("click", () => $("sheetFile").click());
 $("sClose").addEventListener("click", () => $("sheetPanel").classList.add("hidden"));
 
+/* ---------------- templates ----------------
+   定番RPGマップの「型」を下地として自動生成する。
+   タイル参照は内蔵シート固定: 0=地面, 2=水辺, tileId(s,t)
+   地面シート: 0-7草 / 8-15濃緑 / 16-23花草 / 24-31土砂 / 32-39濃土 / 40-47石 / 48-55石畳 */
+function makeRng(seed) {
+  let s = seed >>> 0;
+  return () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+}
+
+function tplBase(m, rnd, baseTile, variants, varRate) {
+  const l = m.layers.bg1;
+  for (let i = 0; i < m.w * m.h; i++)
+    l[i] = (rnd() < varRate) ? variants[(rnd() * variants.length) | 0] : baseTile;
+}
+function tplRectFill(m, layer, x0, y0, x1, y1, tile) {
+  for (let y = Math.max(0, y0); y <= Math.min(m.h - 1, y1); y++)
+    for (let x = Math.max(0, x0); x <= Math.min(m.w - 1, x1); x++)
+      m.layers[layer][y * m.w + x] = tile;
+}
+function tplBlob(m, layer, cx, cy, rx, ry, tile, rnd) {
+  for (let y = 0; y < m.h; y++)
+    for (let x = 0; x < m.w; x++) {
+      const dx = (x - cx) / rx, dy = (y - cy) / ry;
+      if (dx * dx + dy * dy <= 1 + (rnd() - 0.5) * 0.35)
+        m.layers[layer][y * m.w + x] = tile;
+    }
+}
+function tplPathH(m, layer, tile, rnd, width) {
+  let y = (m.h / 2 + (rnd() - 0.5) * m.h * 0.3) | 0;
+  for (let x = 0; x < m.w; x++) {
+    for (let k = 0; k < width; k++) {
+      const yy = y + k;
+      if (yy >= 0 && yy < m.h) m.layers[layer][yy * m.w + x] = tile;
+    }
+    if (rnd() < 0.35) y += rnd() < 0.5 ? -1 : 1;
+    y = Math.max(1, Math.min(m.h - width - 1, y));
+  }
+  return y;
+}
+function tplPathV(m, layer, tile, rnd, width, x0) {
+  let x = x0 !== undefined ? x0 : (m.w / 2 + (rnd() - 0.5) * m.w * 0.3) | 0;
+  for (let y = 0; y < m.h; y++) {
+    for (let k = 0; k < width; k++) {
+      const xx = x + k;
+      if (xx >= 0 && xx < m.w) m.layers[layer][y * m.w + xx] = tile;
+    }
+    if (rnd() < 0.35) x += rnd() < 0.5 ? -1 : 1;
+    x = Math.max(1, Math.min(m.w - width - 1, x));
+  }
+}
+const G = (t) => tileId(0, t);   // 地面シート
+const W2 = (t) => tileId(2, t);  // 水辺シート
+const TW = (t) => tileId(7, t);  // タワー床シート
+
+const TEMPLATES = [
+  { key: "blank", label: "まっさら", gen: null },
+  {
+    key: "plain", label: "草原と道",
+    gen: (m, rnd) => {
+      tplBase(m, rnd, G(1), [G(0), G(2), G(3), G(5)], 0.14);
+      tplPathH(m, "bg2", G(24), rnd, 2);
+      // 花のパッチ
+      for (let i = 0; i < (m.w * m.h) / 180; i++)
+        tplBlob(m, "bg1", rnd() * m.w, rnd() * m.h, 1.6 + rnd() * 2, 1.2 + rnd() * 1.6, G(rnd() < 0.5 ? 2 : 5), rnd);
+    }
+  },
+  {
+    key: "lake", label: "湖畔",
+    gen: (m, rnd) => {
+      tplBase(m, rnd, G(1), [G(0), G(2), G(3)], 0.15);
+      const cx = m.w * (0.3 + rnd() * 0.4), cy = m.h * (0.3 + rnd() * 0.4);
+      const rx = m.w * 0.22, ry = m.h * 0.2;
+      // 砂浜 → 水
+      tplBlob(m, "bg1", cx, cy, rx * 1.35, ry * 1.35, G(24), rnd);
+      tplBlob(m, "bg1", cx, cy, rx, ry, W2(0), rnd);
+      // 湖から端へ川
+      const vx = (cx + (rnd() < 0.5 ? -1 : 1) * rx * 0.4) | 0;
+      for (let y = cy | 0; y < m.h; y++)
+        for (let k = 0; k < 2; k++)
+          if (vx + k < m.w) m.layers.bg1[y * m.w + vx + k] = W2(0);
+      tplPathH(m, "bg2", G(25), rnd, 2);
+    }
+  },
+  {
+    key: "village", label: "村",
+    gen: (m, rnd) => {
+      tplBase(m, rnd, G(1), [G(0), G(2), G(4)], 0.12);
+      // 中央広場(石畳)+ 十字路(土)
+      const cw = Math.max(6, m.w * 0.28 | 0), ch = Math.max(6, m.h * 0.28 | 0);
+      const cx = m.w / 2 | 0, cy = m.h / 2 | 0;
+      tplPathH(m, "bg2", G(24), rnd, 2);
+      tplPathV(m, "bg2", G(24), rnd, 2);
+      tplRectFill(m, "bg2", cx - cw / 2 | 0, cy - ch / 2 | 0, cx + cw / 2 | 0, cy + ch / 2 | 0, G(48));
+      // 隅に池
+      tplBlob(m, "bg1", m.w * 0.82, m.h * 0.8, m.w * 0.1, m.h * 0.09, W2(0), rnd);
+      // 花壇
+      for (let i = 0; i < 4; i++)
+        tplBlob(m, "bg1", rnd() * m.w, rnd() * m.h, 1.5, 1.2, G(6), rnd);
+    }
+  },
+  {
+    key: "cave", label: "洞窟",
+    gen: (m, rnd) => {
+      tplBase(m, rnd, G(34), [G(32), G(33), G(35)], 0.22);
+      // 石の通路
+      tplPathH(m, "bg2", G(41), rnd, 2);
+      // 地底湖
+      if (rnd() < 0.8)
+        tplBlob(m, "bg1", m.w * (0.2 + rnd() * 0.6), m.h * (0.2 + rnd() * 0.6), m.w * 0.13, m.h * 0.11, W2(6), rnd);
+    }
+  },
+  {
+    key: "tower", label: "魔法の塔",
+    gen: (m, rnd) => {
+      tplBase(m, rnd, TW(1), [TW(0), TW(2), TW(3)], 0.2);
+      // 中央に紫の絨毯 + 最奥の魔法の間
+      const x = (m.w / 2 - 1) | 0;
+      tplPathV(m, "bg2", TW(9), rnd, 2, x);
+      const hallB = Math.max(4, m.h * 0.24 | 0);
+      tplRectFill(m, "bg2", x - 3, 1, x + 4, hallB, TW(8));
+      // 魔法陣を1枚だけ中央に
+      m.layers.bg2[(((1 + hallB) / 2) | 0) * m.w + x] = TW(57);
+    }
+  },
+];
+
 /* ---------------- map list ---------------- */
 function fmtDate(t) {
   const d = new Date(t);
@@ -1108,34 +1234,61 @@ function openMap(id) {
   resizeCanvas(); fitView(); render();
 }
 
-function createMap(name, w, h) {
+function createMap(name, w, h, tpl) {
   const id = genId();
+  const data = newMapData(w, h);
+  const t = TEMPLATES.find(x => x.key === tpl);
+  if (t && t.gen) t.gen(data, makeRng(Date.now()));
   index.maps.push({ id, name: name || `マップ${index.maps.length + 1}`, w, h, updated: Date.now(), thumb: null });
-  localStorage.setItem(KEY_MAP(id), JSON.stringify(newMapData(w, h)));
+  localStorage.setItem(KEY_MAP(id), JSON.stringify(data));
   saveIndex();
   openMap(id);
+  saveLocal(); // サムネイル生成
 }
 
 $("listBtn").addEventListener("click", showMapList);
 $("addMapBtn").addEventListener("click", () => openDialog({
-  title: "新しいマップ", name: `マップ${index.maps.length + 1}`, showSize: true,
-  cb: ({ name, w, h }) => createMap(name, w, h)
+  title: "新しいマップ", name: `マップ${index.maps.length + 1}`, showSize: true, showTpl: true,
+  cb: ({ name, w, h, tpl }) => createMap(name, w, h, tpl)
 }));
+$("listTips").addEventListener("click", () => $("tipsPanel").classList.remove("hidden"));
+$("mTips").addEventListener("click", () => {
+  menuPanel.classList.add("hidden");
+  $("tipsPanel").classList.remove("hidden");
+});
+$("tClose").addEventListener("click", () => $("tipsPanel").classList.add("hidden"));
 
 /* ---------------- dialog ---------------- */
 let dlgCb = null;
-function openDialog({ title, name = "", w = 32, h = 32, showName = true, showSize = true, cb }) {
+let dlgTpl = "blank";
+function openDialog({ title, name = "", w = 32, h = 32, showName = true, showSize = true, showTpl = false, cb }) {
   $("dlgTitle").textContent = title;
   $("dlgName").value = name;
   $("dlgW").value = w; $("dlgH").value = h;
   $("dlgNameRow").classList.toggle("hidden", !showName);
   $("dlgSizeRow").classList.toggle("hidden", !showSize);
+  $("dlgTplRow").classList.toggle("hidden", !showTpl);
+  if (showTpl) {
+    dlgTpl = "blank";
+    const box = $("dlgTpls");
+    box.innerHTML = "";
+    for (const t of TEMPLATES) {
+      const b = document.createElement("button");
+      b.textContent = t.label;
+      b.classList.toggle("active", t.key === dlgTpl);
+      b.addEventListener("click", () => {
+        dlgTpl = t.key;
+        box.querySelectorAll("button").forEach(x => x.classList.toggle("active", x === b));
+      });
+      box.appendChild(b);
+    }
+  }
   dlgCb = cb;
   $("mapDialog").classList.remove("hidden");
 }
 $("dlgOk").addEventListener("click", () => {
   const clamp = (v, d) => { const n = parseInt(v, 10); return isNaN(n) ? d : Math.max(8, Math.min(100, n)); };
-  const res = { name: $("dlgName").value.trim(), w: clamp($("dlgW").value, 32), h: clamp($("dlgH").value, 32) };
+  const res = { name: $("dlgName").value.trim(), w: clamp($("dlgW").value, 32), h: clamp($("dlgH").value, 32), tpl: dlgTpl };
   $("mapDialog").classList.add("hidden");
   if (dlgCb) dlgCb(res);
   dlgCb = null;
