@@ -446,6 +446,15 @@ function objAction(fn) {
   saveLocal(); render();
   if (selObj >= 0) showObjToolbar(); else hideObjToolbar();
 }
+function objScaleBy(k) {
+  objAction(() => {
+    const o = map.objects[selObj];
+    o.scale = Math.max(0.2, Math.min(10, o.scale * k));
+    showZoomHint("×" + o.scale.toFixed(2));
+  });
+}
+$("objSmaller").addEventListener("click", () => objScaleBy(1 / 1.2));
+$("objBigger").addEventListener("click", () => objScaleBy(1.2));
 $("objDel").addEventListener("click", () => objAction(() => {
   map.objects.splice(selObj, 1); selObj = -1;
 }));
@@ -506,7 +515,8 @@ canvas.addEventListener("pointerdown", (ev) => {
         gesture = "objdrag";
         hideObjToolbar();
       } else {
-        selObj = -1; hideObjToolbar();
+        // 選択は維持したままパン(選択解除は「動かさずタップ」した時だけ)
+        hideObjToolbar();
         gesture = "pan";
       }
       render();
@@ -532,8 +542,10 @@ canvas.addEventListener("pointerdown", (ev) => {
       else endStroke();
     }
     if (gesture === "rect") rectSel = null;
-    if (mode === "obj" && gesture === "objdrag" && selObj >= 0) {
+    if (mode === "obj" && selObj >= 0 && map.objects[selObj]) {
+      // 選択中なら画面のどこをピンチしてもオブジェクトを拡縮
       gesture = "objpinch";
+      if (!objBefore) objBefore = objSnapshot();
       pinch0 = { dist: pdist(), scale: map.objects[selObj].scale };
     } else {
       gesture = "pinch";
@@ -550,6 +562,8 @@ canvas.addEventListener("pointermove", (ev) => {
   const p = { x: ev.clientX - rect.left, y: ev.clientY - rect.top };
   const prev = pointers.get(ev.pointerId);
   pointers.set(ev.pointerId, p);
+
+  if (down && Math.hypot(p.x - down.p.x, p.y - down.p.y) > TAP_MOVE_PX) down.moved = true;
 
   if (pointers.size === 1) {
     const c = worldToCell(screenToWorld(p.x, p.y));
@@ -630,6 +644,9 @@ function pointerEnd(ev) {
       const r = rectSel; rectSel = null;
       if (r) commitRect(r.a, r.b);
       render();
+    } else if (gesture === "pan" && mode === "obj" && down && !down.moved && selObj >= 0) {
+      // 空きを動かさずタップ → 選択解除
+      selObj = -1; hideObjToolbar(); render();
     } else if ((gesture === "objdrag" || gesture === "objpinch") && objBefore) {
       const after = objSnapshot();
       if (JSON.stringify(after) !== JSON.stringify(objBefore))

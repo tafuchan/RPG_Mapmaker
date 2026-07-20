@@ -28,6 +28,8 @@
   <div id="canvasWrap">
     <canvas id="mapCanvas"></canvas>
     <div id="objToolbar" class="hidden">
+      <button id="objSmaller" title="縮小">➖</button>
+      <button id="objBigger" title="拡大">➕</button>
       <button id="objDup" title="複製">⧉</button>
       <button id="objFlip" title="左右反転">⇋</button>
       <button id="objFront" title="前面へ">▲</button>
@@ -143,7 +145,7 @@
       <h3>使い方</h3>
       <ul>
         <li><b>背景1〜3</b>: タイルを塗るレイヤー。1が最背面。</li>
-        <li><b>オブジェ</b>: タイルを自由な位置に置く。タップで選択、ドラッグで移動、<b>2本指ピンチで拡大縮小</b>。</li>
+        <li><b>オブジェ</b>: タイルを自由な位置に置く。タップで選択、ドラッグで移動。選択中は<b>画面のどこでも2本指ピンチ</b>か<b>➖➕ボタン</b>で拡大縮小。空きをタップで選択解除。</li>
         <li>背景モード: 1本指でなぞって描画、<b>2本指でパン・ズーム</b>。</li>
         <li>▦ 四角塗り: 斜めにドラッグした範囲を一括で塗る。</li>
         <li>🪣 塗りつぶし: 同じタイルの領域をまとめて塗る。</li>
