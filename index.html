@@ -98,6 +98,7 @@
       <button id="mResize">📐 マップサイズ変更</button>
       <button id="mClearLayer">🧹 このレイヤーを一括クリア</button>
       <button id="mClearAll">🗑 マップ全体を一括クリア</button>
+      <button id="mSheets">🧩 追加タイルシートの管理</button>
       <button id="mGrid">グリッド表示: <span id="mGridState">ON</span></button>
       <button id="mDim">他レイヤーを暗く: <span id="mDimState">OFF</span></button>
       <button id="mHelp">❓ 使い方</button>
@@ -118,12 +119,25 @@
         <li>💧 スポイト: タップした場所のタイルを選択。<b>マップを長押し</b>でもスポイトになる。</li>
         <li>⛶ で全体表示に戻る。</li>
         <li>データは自動保存。📋からマップの追加・切替・複製・削除。</li>
+        <li><b>タイルの追加</b>: パレットの「＋」タブから画像をアップロード。マゼンタ(ピンク)背景や透過PNGは自動で切り出し・透過処理される。追加したタイルはこの端末のブラウザに保存される。</li>
       </ul>
       <button id="hClose" class="secondary">閉じる</button>
     </div>
   </div>
 
+  <!-- 追加タイルシート管理 -->
+  <div id="sheetPanel" class="hidden">
+    <div class="menu-inner">
+      <h3>追加タイルシート</h3>
+      <div id="sheetList"></div>
+      <button id="sAdd" class="primary">＋ 画像から追加</button>
+      <button id="sClose" class="secondary">閉じる</button>
+      <p>マゼンタ背景シート・透過PNGに対応。この端末のブラウザ内に保存されます。</p>
+    </div>
+  </div>
+
   <input type="file" id="fileInput" accept=".json,application/json" class="hidden">
+  <input type="file" id="sheetFile" accept="image/*" multiple class="hidden">
   <div id="loading">タイル読み込み中…</div>
 </div>
 <script src="app.js"></script>
