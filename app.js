@@ -24,6 +24,7 @@ let tool = "pen";             // pen|rect|fill|eraser|picker
 let sel = { sheet: 0, tile: 0 };
 let selObj = -1;
 let recent = [];              // [{s,t}]
+let brush = 1;                // ペン/消しゴムのブラシサイズ(1/2/3)
 let showGrid = true;
 let dimOthers = false;
 let undoStack = [], redoStack = [];
@@ -245,6 +246,13 @@ function render() {
     ctx.strokeStyle = "#ffb648"; ctx.lineWidth = 2; ctx.setLineDash([6, 4]);
     ctx.strokeRect(ox + d.x * sc - 3, oy + d.y * sc - 3, d.w * sc + 6, d.h * sc + 6);
     ctx.setLineDash([]);
+    // 縦横リサイズハンドル(右・下・右下角)
+    for (const hnd of objHandlePositions()) {
+      ctx.fillStyle = "#ffb648";
+      ctx.strokeStyle = "#fff"; ctx.lineWidth = 2;
+      ctx.fillRect(hnd.x - HANDLE_PX / 2, hnd.y - HANDLE_PX / 2, HANDLE_PX, HANDLE_PX);
+      ctx.strokeRect(hnd.x - HANDLE_PX / 2, hnd.y - HANDLE_PX / 2, HANDLE_PX, HANDLE_PX);
+    }
   }
 
   // 四角塗りのプレビュー
@@ -305,6 +313,24 @@ function hitHandle(p) {
   return null;
 }
 
+function objHandlePositions() {
+  if (selObj < 0 || !map.objects[selObj]) return [];
+  const d = objDrawRect(map.objects[selObj]);
+  const sc = view.scale;
+  const x0 = (d.x - view.x) * sc, y0 = (d.y - view.y) * sc;
+  const w = d.w * sc, h = d.h * sc;
+  return [
+    { k: "r", x: x0 + w + 8, y: y0 + h / 2 },
+    { k: "b", x: x0 + w / 2, y: y0 + h + 8 },
+    { k: "br", x: x0 + w + 8, y: y0 + h + 8 },
+  ];
+}
+function hitObjHandle(p) {
+  for (const hnd of objHandlePositions())
+    if (Math.abs(p.x - hnd.x) <= HANDLE_HIT && Math.abs(p.y - hnd.y) <= HANDLE_HIT) return hnd;
+  return null;
+}
+
 /* マップサイズ変更: offX/offY = 左/上に追加する列・行数(負なら削除) */
 function resizeMapTo(newW, newH, offX, offY) {
   const before = { w: map.w, h: map.h, layers: JSON.parse(JSON.stringify(map.layers)), objects: objSnapshot() };
@@ -326,12 +352,23 @@ function resizeMapTo(newW, newH, offX, offY) {
   saveLocal();
 }
 
+function objScales(o) {
+  // 旧形式(scale単一)との互換
+  const sx = o.sx !== undefined ? o.sx : (o.scale !== undefined ? o.scale : 1);
+  const sy = o.sy !== undefined ? o.sy : (o.scale !== undefined ? o.scale : 1);
+  return { sx, sy };
+}
 function objDrawRect(o) {
   const sh = getSheet(o.s), ti = sh && sh.tiles[o.t];
   if (!ti) return { x: o.x - 1, y: o.y - 1, w: 2, h: 2 };
-  const base = TILE * o.scale / meta.tilePx;
-  const w = ti.w * base, h = ti.h * base;
+  const { sx, sy } = objScales(o);
+  const w = ti.w * TILE * sx / meta.tilePx, h = ti.h * TILE * sy / meta.tilePx;
   return { x: o.x - w / 2, y: o.y - h / 2, w, h };
+}
+function normObjects(list) {
+  for (const o of list || []) {
+    if (o.sx === undefined) { const s = objScales(o); o.sx = s.sx; o.sy = s.sy; }
+  }
 }
 
 /* ---------------- coords ---------------- */
@@ -350,7 +387,13 @@ let rectSel = null;  // {a:cell, b:cell} 四角塗りプレビュー
 
 function beginStroke(c) {
   stroke = { layer: mode, changes: new Map(), lastCell: c };
-  paintCell(c);
+  paintBlock(c);
+}
+function paintBlock(c) {
+  const off = brush === 3 ? -1 : 0;   // 3×3は中心塗り、2×2は右下方向
+  for (let dy = 0; dy < brush; dy++)
+    for (let dx = 0; dx < brush; dx++)
+      paintCell({ x: c.x + dx + off, y: c.y + dy + off });
 }
 function paintCell(c) {
   if (!inMap(c)) return;
@@ -365,7 +408,7 @@ function paintCell(c) {
 function paintLine(c0, c1) {
   const n = Math.max(Math.abs(c1.x - c0.x), Math.abs(c1.y - c0.y));
   for (let i = 0; i <= n; i++)
-    paintCell({ x: Math.round(c0.x + (c1.x - c0.x) * i / (n || 1)), y: Math.round(c0.y + (c1.y - c0.y) * i / (n || 1)) });
+    paintBlock({ x: Math.round(c0.x + (c1.x - c0.x) * i / (n || 1)), y: Math.round(c0.y + (c1.y - c0.y) * i / (n || 1)) });
 }
 function endStroke() {
   if (stroke && stroke.changes.size) {
@@ -477,7 +520,7 @@ function addObjectAtCenter() {
     s: sel.sheet, t: sel.tile,
     x: Math.max(0, Math.min(map.w * TILE, w.x)),
     y: Math.max(0, Math.min(map.h * TILE, w.y)),
-    scale: 3, flip: false   // 初期サイズは3×3マス相当
+    sx: 3, sy: 3, flip: false   // 初期サイズは3×3マス相当
   });
   selObj = map.objects.length - 1;
   pushUndo({ type: "objects", before, after: objSnapshot() });
@@ -512,8 +555,11 @@ function objAction(fn) {
 function objScaleBy(k) {
   objAction(() => {
     const o = map.objects[selObj];
-    o.scale = Math.max(0.2, Math.min(10, o.scale * k));
-    showZoomHint("×" + o.scale.toFixed(2));
+    const s = objScales(o);
+    o.sx = Math.max(0.2, Math.min(20, s.sx * k));
+    o.sy = Math.max(0.2, Math.min(20, s.sy * k));
+    showZoomHint(o.sx.toFixed(2) === o.sy.toFixed(2)
+      ? "×" + o.sx.toFixed(2) : `${o.sx.toFixed(2)} × ${o.sy.toFixed(2)}`);
   });
 }
 $("objSmaller").addEventListener("click", () => objScaleBy(1 / 1.2));
@@ -545,6 +591,7 @@ const pointers = new Map();
 let gesture = null;   // pending|paint|rect|pan|pinch|objdrag|objpinch|longpicked|resize
 let down = null;      // {p, t, cell, world}
 let resize = null;    // {edge, w0, h0, world, newW, newH, addLeft, addTop}
+let objResize = null; // {edge, sx0, sy0, world, baseW, baseH}
 let pinch0 = null;
 let objDrag0 = null;
 let objBefore = null;
@@ -570,8 +617,20 @@ canvas.addEventListener("pointerdown", (ev) => {
     const w = screenToWorld(p.x, p.y);
     const c = worldToCell(w);
     down = { p, t: performance.now(), cell: c, world: w };
-    const hnd = hitHandle(p);
-    if (hnd) {
+    const objHnd = mode === "obj" ? hitObjHandle(p) : null;
+    const hnd = objHnd ? null : hitHandle(p);
+    if (objHnd) {
+      const o = map.objects[selObj];
+      const { sx, sy } = objScales(o);
+      const sh = getSheet(o.s), ti = sh.tiles[o.t];
+      gesture = "objresize";
+      objBefore = objSnapshot();
+      objResize = {
+        edge: objHnd.k, sx0: sx, sy0: sy, world: w,
+        baseW: ti.w * TILE / meta.tilePx, baseH: ti.h * TILE / meta.tilePx
+      };
+      hideObjToolbar();
+    } else if (hnd) {
       gesture = "resize";
       resize = { edge: hnd.k, w0: map.w, h0: map.h, world: w, newW: map.w, newH: map.h, addLeft: 0, addTop: 0 };
       render();
@@ -612,11 +671,13 @@ canvas.addEventListener("pointerdown", (ev) => {
     }
     if (gesture === "rect") rectSel = null;
     if (gesture === "resize") resize = null;
+    if (gesture === "objresize") objResize = null;
     if (mode === "obj" && selObj >= 0 && map.objects[selObj]) {
       // 選択中なら画面のどこをピンチしてもオブジェクトを拡縮
       gesture = "objpinch";
       if (!objBefore) objBefore = objSnapshot();
-      pinch0 = { dist: pdist(), scale: map.objects[selObj].scale };
+      const s = objScales(map.objects[selObj]);
+      pinch0 = { dist: pdist(), sx0: s.sx, sy0: s.sy };
     } else {
       gesture = "pinch";
       const m = pmid();
@@ -637,6 +698,18 @@ canvas.addEventListener("pointermove", (ev) => {
 
   if (pointers.size === 1) {
     const c = worldToCell(screenToWorld(p.x, p.y));
+    if (gesture === "objresize" && selObj >= 0) {
+      const wNow = screenToWorld(p.x, p.y);
+      const o = map.objects[selObj];
+      const clampS = (v) => Math.max(0.2, Math.min(20, v));
+      if (objResize.edge === "r" || objResize.edge === "br")
+        o.sx = clampS(objResize.sx0 + (wNow.x - objResize.world.x) / objResize.baseW);
+      if (objResize.edge === "b" || objResize.edge === "br")
+        o.sy = clampS(objResize.sy0 + (wNow.y - objResize.world.y) / objResize.baseH);
+      showZoomHint(`${o.sx.toFixed(2)} × ${o.sy.toFixed(2)}`);
+      render();
+      return;
+    }
     if (gesture === "resize") {
       const wNow = screenToWorld(p.x, p.y);
       const dx = Math.round((wNow.x - resize.world.x) / TILE);
@@ -690,9 +763,12 @@ canvas.addEventListener("pointermove", (ev) => {
     }
   } else if (pointers.size === 2) {
     if (gesture === "objpinch" && selObj >= 0) {
-      const s = Math.max(0.2, Math.min(10, pinch0.scale * pdist() / pinch0.dist));
-      map.objects[selObj].scale = s;
-      showZoomHint("×" + s.toFixed(2));
+      const k = pdist() / pinch0.dist;
+      const o = map.objects[selObj];
+      o.sx = Math.max(0.2, Math.min(20, pinch0.sx0 * k));
+      o.sy = Math.max(0.2, Math.min(20, pinch0.sy0 * k));
+      showZoomHint(o.sx.toFixed(2) === o.sy.toFixed(2)
+        ? "×" + o.sx.toFixed(2) : `${o.sx.toFixed(2)} × ${o.sy.toFixed(2)}`);
       render();
     } else if (gesture === "pinch") {
       const m = pmid();
@@ -737,7 +813,7 @@ function pointerEnd(ev) {
     } else if (gesture === "pan" && mode === "obj" && down && !down.moved && selObj >= 0) {
       // 空きを動かさずタップ → 選択解除
       selObj = -1; hideObjToolbar(); render();
-    } else if ((gesture === "objdrag" || gesture === "objpinch") && objBefore) {
+    } else if ((gesture === "objdrag" || gesture === "objpinch" || gesture === "objresize") && objBefore) {
       const after = objSnapshot();
       if (JSON.stringify(after) !== JSON.stringify(objBefore))
         pushUndo({ type: "objects", before: objBefore, after });
@@ -745,7 +821,7 @@ function pointerEnd(ev) {
       saveLocal();
     }
     if (mode === "obj" && selObj >= 0) showObjToolbar();
-    gesture = null; pinch0 = null; down = null;
+    gesture = null; pinch0 = null; down = null; objResize = null;
   } else if (pointers.size === 1) {
     // ピンチから1本残り → パンへ(オブジェクト選択は維持)
     gesture = "pan";
@@ -796,6 +872,12 @@ function setTool(t) {
   document.querySelectorAll(".tool").forEach(b => b.classList.toggle("active", b.dataset.tool === t));
 }
 document.querySelectorAll(".tool").forEach(b => b.addEventListener("click", () => setTool(b.dataset.tool)));
+$("brushBtn").addEventListener("click", () => {
+  brush = brush % 3 + 1;
+  $("brushBtn").textContent = brush + "×";
+  $("brushBtn").classList.toggle("active", brush > 1);
+  showZoomHint(`ブラシ ${brush}×${brush}`);
+});
 $("undoBtn").addEventListener("click", doUndo);
 $("redoBtn").addEventListener("click", doRedo);
 $("fitBtn").addEventListener("click", () => { fitView(); render(); });
@@ -1332,6 +1414,7 @@ function openMap(id) {
   try { data = JSON.parse(localStorage.getItem(KEY_MAP(id))); } catch (err) { /* noop */ }
   map = (data && data.w && data.layers) ? data : newMapData(e.w, e.h);
   if (!map.objects) map.objects = [];
+  normObjects(map.objects);
   mapId = id;
   index.last = id;
   saveIndex();
@@ -1503,6 +1586,7 @@ $("fileInput").addEventListener("change", (e) => {
       const name = m.name || f.name.replace(/\.json$/i, "") || "インポート";
       delete m.name;
       if (!m.objects) m.objects = [];
+      normObjects(m.objects);
       localStorage.setItem(KEY_MAP(id), JSON.stringify(m));
       index.maps.push({ id, name, w: m.w, h: m.h, updated: Date.now(), thumb: null });
       saveIndex();
