@@ -39,9 +39,25 @@ function newMapData(w, h) {
   return {
     w, h,
     layers: { bg1: new Array(w * h).fill(-1), bg2: new Array(w * h).fill(-1), bg3: new Array(w * h).fill(-1) },
-    objects: []               // {s,t,x,y,scale,flip}
+    big: { bg1: [], bg2: [], bg3: [] },   // 拡大タイル: {x,y,n,id}(1枚の絵をn×nマス分に拡大配置)
+    objects: []               // {s,t,x,y,sx,sy,flip}
   };
 }
+function normMapExtra(m) {
+  if (!m.objects) m.objects = [];
+  normObjects(m.objects);
+  if (!m.big) m.big = { bg1: [], bg2: [], bg3: [] };
+  for (const l of BG_LAYERS) if (!Array.isArray(m.big[l])) m.big[l] = [];
+}
+function bigAt(layer, x, y) {
+  const arr = map.big[layer];
+  for (let i = arr.length - 1; i >= 0; i--) {
+    const b = arr[i];
+    if (x >= b.x && x < b.x + b.n && y >= b.y && y < b.y + b.n) return { b, i };
+  }
+  return null;
+}
+function bigSnapshot(layer) { return JSON.parse(JSON.stringify(map.big[layer])); }
 function tileId(s, t) { return s * 1000 + t; }
 function idSheet(id) { return Math.floor(id / 1000); }
 function idTile(id) { return id % 1000; }
@@ -113,6 +129,7 @@ function makeThumb() {
           const id = layer[y * map.w + x];
           if (id >= 0) drawTile(id, x * P, y * P, P, P, g);
         }
+      for (const b of map.big[lname]) drawTile(b.id, b.x * P, b.y * P, b.n * P, b.n * P, g);
     }
     const k = P / TILE;
     for (const o of map.objects) {
@@ -134,18 +151,21 @@ function applyEntry(e, dir) {
   if (e.type === "cells") {
     for (const [i, before, after] of e.changes)
       map.layers[e.layer][i] = dir === "undo" ? before : after;
+    if (e.bigBefore) map.big[e.layer] = JSON.parse(JSON.stringify(dir === "undo" ? e.bigBefore : e.bigAfter));
   } else if (e.type === "objects") {
     map.objects = JSON.parse(JSON.stringify(dir === "undo" ? e.before : e.after));
     selObj = -1; hideObjToolbar();
   } else if (e.type === "full") {
     const s = dir === "undo" ? e.before : e.after;
     map.layers = JSON.parse(JSON.stringify(s.layers));
+    map.big = JSON.parse(JSON.stringify(s.big || { bg1: [], bg2: [], bg3: [] }));
     map.objects = JSON.parse(JSON.stringify(s.objects));
     selObj = -1; hideObjToolbar();
   } else if (e.type === "resize") {
     const s = dir === "undo" ? e.before : e.after;
     map.w = s.w; map.h = s.h;
     map.layers = JSON.parse(JSON.stringify(s.layers));
+    map.big = JSON.parse(JSON.stringify(s.big || { bg1: [], bg2: [], bg3: [] }));
     map.objects = JSON.parse(JSON.stringify(s.objects));
     selObj = -1; hideObjToolbar();
   }
@@ -168,7 +188,11 @@ function updateUndoButtons() {
 }
 function objSnapshot() { return JSON.parse(JSON.stringify(map.objects)); }
 function fullSnapshot() {
-  return { layers: JSON.parse(JSON.stringify(map.layers)), objects: JSON.parse(JSON.stringify(map.objects)) };
+  return {
+    layers: JSON.parse(JSON.stringify(map.layers)),
+    big: JSON.parse(JSON.stringify(map.big)),
+    objects: JSON.parse(JSON.stringify(map.objects))
+  };
 }
 
 /* ---------------- rendering ---------------- */
@@ -224,6 +248,10 @@ function render() {
         const id = layer[y * map.w + x];
         if (id >= 0) drawTile(id, ox + x * ts, oy + y * ts, ts + 0.6, ts + 0.6);
       }
+    for (const b of map.big[lname]) {
+      if (b.x + b.n - 1 < x0 || b.x > x1 || b.y + b.n - 1 < y0 || b.y > y1) continue;
+      drawTile(b.id, ox + b.x * ts, oy + b.y * ts, b.n * ts + 0.6, b.n * ts + 0.6);
+    }
   }
   ctx.globalAlpha = dimOthers && mode !== "obj" ? 0.5 : 1;
 
@@ -333,7 +361,7 @@ function hitObjHandle(p) {
 
 /* マップサイズ変更: offX/offY = 左/上に追加する列・行数(負なら削除) */
 function resizeMapTo(newW, newH, offX, offY) {
-  const before = { w: map.w, h: map.h, layers: JSON.parse(JSON.stringify(map.layers)), objects: objSnapshot() };
+  const before = { w: map.w, h: map.h, layers: JSON.parse(JSON.stringify(map.layers)), big: JSON.parse(JSON.stringify(map.big)), objects: objSnapshot() };
   const nm = newMapData(newW, newH);
   for (const l of BG_LAYERS)
     for (let y = 0; y < map.h; y++) {
@@ -345,10 +373,16 @@ function resizeMapTo(newW, newH, offX, offY) {
         nm.layers[l][ny * newW + nx] = map.layers[l][y * map.w + x];
       }
     }
+  for (const l of BG_LAYERS)
+    for (const b of map.big[l]) {
+      const nx = b.x + offX, ny = b.y + offY;
+      if (nx >= 0 && ny >= 0 && nx + b.n <= newW && ny + b.n <= newH)
+        nm.big[l].push({ x: nx, y: ny, n: b.n, id: b.id });
+    }
   nm.objects = map.objects.map(o => ({ ...o, x: o.x + offX * TILE, y: o.y + offY * TILE }));
   map = nm;
   selObj = -1; hideObjToolbar();
-  pushUndo({ type: "resize", before, after: { w: map.w, h: map.h, layers: JSON.parse(JSON.stringify(map.layers)), objects: objSnapshot() } });
+  pushUndo({ type: "resize", before, after: { w: map.w, h: map.h, layers: JSON.parse(JSON.stringify(map.layers)), big: JSON.parse(JSON.stringify(map.big)), objects: objSnapshot() } });
   saveLocal();
 }
 
@@ -386,34 +420,63 @@ let stroke = null;   // {layer, changes:Map(idx->[before,after]), lastCell}
 let rectSel = null;  // {a:cell, b:cell} 四角塗りプレビュー
 
 function beginStroke(c) {
-  stroke = { layer: mode, changes: new Map(), lastCell: c };
-  paintBlock(c);
+  stroke = { layer: mode, changes: new Map(), lastCell: c, bigBefore: bigSnapshot(mode) };
+  stampAt(c);
 }
-function paintBlock(c) {
-  const off = brush === 3 ? -1 : 0;   // 3×3は中心塗り、2×2は右下方向
-  for (let dy = 0; dy < brush; dy++)
-    for (let dx = 0; dx < brush; dx++)
-      paintCell({ x: c.x + dx + off, y: c.y + dy + off });
+function stampAt(c) {
+  if (brush === 1) paintSingle(c);
+  else stampBig(c);
 }
-function paintCell(c) {
+function paintSingle(c) {
   if (!inMap(c)) return;
   const layer = map.layers[mode];
   const i = c.y * map.w + c.x;
+  // 大きいタイルに重なっていたら、そのタイルごと消してから1マス塗る
+  const hit = bigAt(mode, c.x, c.y);
+  if (hit) map.big[mode].splice(hit.i, 1);
   const val = tool === "eraser" ? -1 : tileId(sel.sheet, sel.tile);
   if (layer[i] === val) return;
   if (!stroke.changes.has(i)) stroke.changes.set(i, [layer[i], val]);
   else stroke.changes.get(i)[1] = val;
   layer[i] = val;
 }
+function stampBig(c) {
+  const n = brush;
+  const x0 = Math.max(0, Math.min(map.w - n, c.x));
+  const y0 = Math.max(0, Math.min(map.h - n, c.y));
+  const x1 = x0 + n - 1, y1 = y0 + n - 1;
+  const layer = map.layers[mode];
+  for (let y = y0; y <= y1; y++)
+    for (let x = x0; x <= x1; x++) {
+      const i = y * map.w + x;
+      if (layer[i] !== -1) {
+        if (!stroke.changes.has(i)) stroke.changes.set(i, [layer[i], -1]);
+        else stroke.changes.get(i)[1] = -1;
+        layer[i] = -1;
+      }
+    }
+  const arr = map.big[mode];
+  for (let i = arr.length - 1; i >= 0; i--) {
+    const b = arr[i];
+    if (!(b.x + b.n - 1 < x0 || b.x > x1 || b.y + b.n - 1 < y0 || b.y > y1)) arr.splice(i, 1);
+  }
+  if (tool !== "eraser") arr.push({ x: x0, y: y0, n, id: tileId(sel.sheet, sel.tile) });
+}
 function paintLine(c0, c1) {
   const n = Math.max(Math.abs(c1.x - c0.x), Math.abs(c1.y - c0.y));
   for (let i = 0; i <= n; i++)
-    paintBlock({ x: Math.round(c0.x + (c1.x - c0.x) * i / (n || 1)), y: Math.round(c0.y + (c1.y - c0.y) * i / (n || 1)) });
+    stampAt({ x: Math.round(c0.x + (c1.x - c0.x) * i / (n || 1)), y: Math.round(c0.y + (c1.y - c0.y) * i / (n || 1)) });
 }
 function endStroke() {
-  if (stroke && stroke.changes.size) {
-    pushUndo({ type: "cells", layer: stroke.layer, changes: [...stroke.changes.entries()].map(([i, [b, a]]) => [i, b, a]) });
-    saveLocal();
+  if (stroke) {
+    const bigNow = bigSnapshot(stroke.layer);
+    const bigChanged = JSON.stringify(bigNow) !== JSON.stringify(stroke.bigBefore);
+    if (stroke.changes.size || bigChanged) {
+      const entry = { type: "cells", layer: stroke.layer, changes: [...stroke.changes.entries()].map(([i, [b, a]]) => [i, b, a]) };
+      if (bigChanged) { entry.bigBefore = stroke.bigBefore; entry.bigAfter = bigNow; }
+      pushUndo(entry);
+      saveLocal();
+    }
   }
   stroke = null;
 }
@@ -421,6 +484,7 @@ function revertStroke() {
   if (stroke) {
     for (const [i, [before]] of stroke.changes.entries())
       map.layers[stroke.layer][i] = before;
+    map.big[stroke.layer] = stroke.bigBefore;
   }
   stroke = null;
 }
@@ -436,17 +500,36 @@ function commitRect(a, b) {
       const i = y * map.w + x;
       if (layer[i] !== val) { changes.push([i, layer[i], val]); layer[i] = val; }
     }
-  if (changes.length) {
-    pushUndo({ type: "cells", layer: mode, changes });
+  const bigBefore = bigSnapshot(mode);
+  const arr = map.big[mode];
+  for (let i = arr.length - 1; i >= 0; i--) {
+    const bt = arr[i];
+    if (!(bt.x + bt.n - 1 < ax || bt.x > bx || bt.y + bt.n - 1 < ay || bt.y > by)) arr.splice(i, 1);
+  }
+  const bigChanged = JSON.stringify(map.big[mode]) !== JSON.stringify(bigBefore);
+  if (changes.length || bigChanged) {
+    const entry = { type: "cells", layer: mode, changes };
+    if (bigChanged) { entry.bigBefore = bigBefore; entry.bigAfter = bigSnapshot(mode); }
+    pushUndo(entry);
     saveLocal();
   }
 }
 
 function floodFill(c) {
   if (!inMap(c)) return;
+  const val = tileId(sel.sheet, sel.tile);
+  // タップした場所が大きいタイルの上なら、そのタイル1個だけ塗り替える
+  const hit = bigAt(mode, c.x, c.y);
+  if (hit) {
+    if (hit.b.id === val) return;
+    const bigBefore = bigSnapshot(mode);
+    hit.b.id = val;
+    pushUndo({ type: "cells", layer: mode, changes: [], bigBefore, bigAfter: bigSnapshot(mode) });
+    saveLocal(); render();
+    return;
+  }
   const layer = map.layers[mode];
   const target = layer[c.y * map.w + c.x];
-  const val = tileId(sel.sheet, sel.tile);
   if (target === val) return;
   const changes = [];
   const q = [c.y * map.w + c.x];
@@ -459,6 +542,7 @@ function floodFill(c) {
     const x = i % map.w, y = Math.floor(i / map.w);
     for (const [nx, ny] of [[x - 1, y], [x + 1, y], [x, y - 1], [x, y + 1]]) {
       if (nx < 0 || ny < 0 || nx >= map.w || ny >= map.h) continue;
+      if (bigAt(mode, nx, ny)) continue;   // 大きいタイルは壁扱い
       const ni = ny * map.w + nx;
       if (!seen.has(ni)) { seen.add(ni); q.push(ni); }
     }
@@ -474,6 +558,14 @@ function pickTile(c) {
   const i = c.y * map.w + c.x;
   const order = [mode, "bg3", "bg2", "bg1"].filter((v, k, a) => v !== "obj" && a.indexOf(v) === k);
   for (const l of order) {
+    const hit = bigAt(l, c.x, c.y);
+    if (hit) {
+      selectTile(idSheet(hit.b.id), idTile(hit.b.id));
+      brush = hit.b.n; updateBrushBtn();
+      buildPaletteTabs(); buildPaletteGrid();
+      if (tool === "picker") setTool("pen");
+      return true;
+    }
     const id = map.layers[l][i];
     if (id >= 0) {
       selectTile(idSheet(id), idTile(id));
@@ -863,6 +955,7 @@ document.querySelectorAll(".mode-tab").forEach(b => {
     document.querySelectorAll("#toolbar .tool").forEach(t => {
       t.style.display = mode === "obj" ? "none" : "";
     });
+    $("brushBtn").style.display = mode === "obj" ? "none" : "";
     render();
   });
 });
@@ -872,11 +965,14 @@ function setTool(t) {
   document.querySelectorAll(".tool").forEach(b => b.classList.toggle("active", b.dataset.tool === t));
 }
 document.querySelectorAll(".tool").forEach(b => b.addEventListener("click", () => setTool(b.dataset.tool)));
-$("brushBtn").addEventListener("click", () => {
-  brush = brush % 3 + 1;
+function updateBrushBtn() {
   $("brushBtn").textContent = brush + "×";
   $("brushBtn").classList.toggle("active", brush > 1);
-  showZoomHint(`ブラシ ${brush}×${brush}`);
+}
+$("brushBtn").addEventListener("click", () => {
+  brush = brush % 3 + 1;
+  updateBrushBtn();
+  showZoomHint(`タイルサイズ ${brush}×${brush}`);
 });
 $("undoBtn").addEventListener("click", doUndo);
 $("redoBtn").addEventListener("click", doRedo);
@@ -1413,8 +1509,7 @@ function openMap(id) {
   let data = null;
   try { data = JSON.parse(localStorage.getItem(KEY_MAP(id))); } catch (err) { /* noop */ }
   map = (data && data.w && data.layers) ? data : newMapData(e.w, e.h);
-  if (!map.objects) map.objects = [];
-  normObjects(map.objects);
+  normMapExtra(map);
   mapId = id;
   index.last = id;
   saveIndex();
@@ -1531,7 +1626,14 @@ $("mClearLayer").addEventListener("click", () => {
     const changes = [];
     for (let i = 0; i < layer.length; i++)
       if (layer[i] >= 0) { changes.push([i, layer[i], -1]); layer[i] = -1; }
-    if (changes.length) pushUndo({ type: "cells", layer: mode, changes });
+    const bigBefore = bigSnapshot(mode);
+    const bigChanged = bigBefore.length > 0;
+    map.big[mode] = [];
+    if (changes.length || bigChanged) {
+      const entry = { type: "cells", layer: mode, changes };
+      if (bigChanged) { entry.bigBefore = bigBefore; entry.bigAfter = []; }
+      pushUndo(entry);
+    }
   }
   saveLocal(); render();
   menuPanel.classList.add("hidden");
@@ -1540,7 +1642,7 @@ $("mClearLayer").addEventListener("click", () => {
 $("mClearAll").addEventListener("click", () => {
   if (!confirm("背景1〜3とオブジェクトを全て消去します。よろしいですか?")) return;
   const before = fullSnapshot();
-  for (const l of BG_LAYERS) map.layers[l].fill(-1);
+  for (const l of BG_LAYERS) { map.layers[l].fill(-1); map.big[l] = []; }
   map.objects = [];
   selObj = -1; hideObjToolbar();
   pushUndo({ type: "full", before, after: fullSnapshot() });
@@ -1558,6 +1660,9 @@ $("mResize").addEventListener("click", () => {
         for (let y = 0; y < Math.min(map.h, h); y++)
           for (let x = 0; x < Math.min(map.w, w); x++)
             nm.layers[l][y * w + x] = map.layers[l][y * map.w + x];
+      for (const l of BG_LAYERS)
+        for (const b of map.big[l])
+          if (b.x + b.n <= w && b.y + b.n <= h) nm.big[l].push({ ...b });
       nm.objects = map.objects;
       map = nm;
       undoStack.length = 0; redoStack.length = 0; updateUndoButtons();
@@ -1585,8 +1690,7 @@ $("fileInput").addEventListener("change", (e) => {
       const id = genId();
       const name = m.name || f.name.replace(/\.json$/i, "") || "インポート";
       delete m.name;
-      if (!m.objects) m.objects = [];
-      normObjects(m.objects);
+      normMapExtra(m);
       localStorage.setItem(KEY_MAP(id), JSON.stringify(m));
       index.maps.push({ id, name, w: m.w, h: m.h, updated: Date.now(), thumb: null });
       saveIndex();
@@ -1610,6 +1714,7 @@ $("mExportPng").addEventListener("click", () => {
         const id = layer[y * map.w + x];
         if (id >= 0) drawTile(id, x * P, y * P, P, P, g);
       }
+    for (const b of map.big[lname]) drawTile(b.id, b.x * P, b.y * P, b.n * P, b.n * P, g);
   }
   const k = P / TILE;
   for (const o of map.objects) {
@@ -1665,6 +1770,8 @@ async function init() {
   updateUndoButtons();
   $("loading").remove();
   showMapList();   // 起動時はマップ一覧から
+  // 画面回転オフ(対応環境のみ。manifestのorientation指定が主で、これは補助)
+  try { screen.orientation && screen.orientation.lock && screen.orientation.lock("portrait").catch(() => {}); } catch (e) { /* noop */ }
 }
 
 new ResizeObserver(() => resizeCanvas()).observe($("canvasWrap"));

@@ -4,7 +4,7 @@
   "description": "RPGマップ作成ドラフトツール",
   "start_url": ".",
   "display": "standalone",
-  "orientation": "any",
+  "orientation": "portrait",
   "background_color": "#1a1c2c",
   "theme_color": "#1a1c2c",
   "icons": [
