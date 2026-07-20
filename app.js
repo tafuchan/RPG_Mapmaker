@@ -141,6 +141,12 @@ function applyEntry(e, dir) {
     map.layers = JSON.parse(JSON.stringify(s.layers));
     map.objects = JSON.parse(JSON.stringify(s.objects));
     selObj = -1; hideObjToolbar();
+  } else if (e.type === "resize") {
+    const s = dir === "undo" ? e.before : e.after;
+    map.w = s.w; map.h = s.h;
+    map.layers = JSON.parse(JSON.stringify(s.layers));
+    map.objects = JSON.parse(JSON.stringify(s.objects));
+    selObj = -1; hideObjToolbar();
   }
 }
 function doUndo() {
@@ -261,6 +267,63 @@ function render() {
 
   ctx.strokeStyle = "#5b8cff88"; ctx.lineWidth = 2;
   ctx.strokeRect(ox, oy, map.w * ts, map.h * ts);
+
+  // リサイズ中は新しい境界を点線でプレビュー
+  if (resize) {
+    ctx.strokeStyle = "#ffb648"; ctx.lineWidth = 2; ctx.setLineDash([8, 5]);
+    ctx.strokeRect(ox - resize.addLeft * ts, oy - resize.addTop * ts,
+      resize.newW * ts, resize.newH * ts);
+    ctx.setLineDash([]);
+  }
+
+  // マップ端のリサイズハンドル(ペイント風)
+  for (const hnd of handlePositions()) {
+    ctx.fillStyle = "#fff";
+    ctx.strokeStyle = "#5b8cff"; ctx.lineWidth = 2;
+    ctx.fillRect(hnd.x - HANDLE_PX / 2, hnd.y - HANDLE_PX / 2, HANDLE_PX, HANDLE_PX);
+    ctx.strokeRect(hnd.x - HANDLE_PX / 2, hnd.y - HANDLE_PX / 2, HANDLE_PX, HANDLE_PX);
+  }
+}
+
+const HANDLE_PX = 12;
+const HANDLE_HIT = 24;
+function handlePositions() {
+  const sc = view.scale, ts = TILE * sc;
+  const ox = -view.x * sc, oy = -view.y * sc;
+  const w = map.w * ts, h = map.h * ts;
+  return [
+    { k: "r", x: ox + w, y: oy + h / 2 },
+    { k: "b", x: ox + w / 2, y: oy + h },
+    { k: "br", x: ox + w, y: oy + h },
+    { k: "l", x: ox, y: oy + h / 2 },
+    { k: "t", x: ox + w / 2, y: oy },
+  ];
+}
+function hitHandle(p) {
+  for (const hnd of handlePositions())
+    if (Math.abs(p.x - hnd.x) <= HANDLE_HIT && Math.abs(p.y - hnd.y) <= HANDLE_HIT) return hnd;
+  return null;
+}
+
+/* マップサイズ変更: offX/offY = 左/上に追加する列・行数(負なら削除) */
+function resizeMapTo(newW, newH, offX, offY) {
+  const before = { w: map.w, h: map.h, layers: JSON.parse(JSON.stringify(map.layers)), objects: objSnapshot() };
+  const nm = newMapData(newW, newH);
+  for (const l of BG_LAYERS)
+    for (let y = 0; y < map.h; y++) {
+      const ny = y + offY;
+      if (ny < 0 || ny >= newH) continue;
+      for (let x = 0; x < map.w; x++) {
+        const nx = x + offX;
+        if (nx < 0 || nx >= newW) continue;
+        nm.layers[l][ny * newW + nx] = map.layers[l][y * map.w + x];
+      }
+    }
+  nm.objects = map.objects.map(o => ({ ...o, x: o.x + offX * TILE, y: o.y + offY * TILE }));
+  map = nm;
+  selObj = -1; hideObjToolbar();
+  pushUndo({ type: "resize", before, after: { w: map.w, h: map.h, layers: JSON.parse(JSON.stringify(map.layers)), objects: objSnapshot() } });
+  saveLocal();
 }
 
 function objDrawRect(o) {
@@ -414,7 +477,7 @@ function addObjectAtCenter() {
     s: sel.sheet, t: sel.tile,
     x: Math.max(0, Math.min(map.w * TILE, w.x)),
     y: Math.max(0, Math.min(map.h * TILE, w.y)),
-    scale: 1, flip: false
+    scale: 3, flip: false   // 初期サイズは3×3マス相当
   });
   selObj = map.objects.length - 1;
   pushUndo({ type: "objects", before, after: objSnapshot() });
@@ -479,8 +542,9 @@ $("objBack").addEventListener("click", () => objAction(() => {
    タップ即描画はしない: 動き始めたら描画、タップは指を離した時に1マス。
    ピンチ開始時は描画中でも取り消してズームに移行する。 */
 const pointers = new Map();
-let gesture = null;   // pending|paint|rect|pan|pinch|objdrag|objpinch|longpicked
+let gesture = null;   // pending|paint|rect|pan|pinch|objdrag|objpinch|longpicked|resize
 let down = null;      // {p, t, cell, world}
+let resize = null;    // {edge, w0, h0, world, newW, newH, addLeft, addTop}
 let pinch0 = null;
 let objDrag0 = null;
 let objBefore = null;
@@ -506,7 +570,12 @@ canvas.addEventListener("pointerdown", (ev) => {
     const w = screenToWorld(p.x, p.y);
     const c = worldToCell(w);
     down = { p, t: performance.now(), cell: c, world: w };
-    if (mode === "obj") {
+    const hnd = hitHandle(p);
+    if (hnd) {
+      gesture = "resize";
+      resize = { edge: hnd.k, w0: map.w, h0: map.h, world: w, newW: map.w, newH: map.h, addLeft: 0, addTop: 0 };
+      render();
+    } else if (mode === "obj") {
       const hit = hitObject(w);
       if (hit >= 0) {
         selObj = hit;
@@ -542,6 +611,7 @@ canvas.addEventListener("pointerdown", (ev) => {
       else endStroke();
     }
     if (gesture === "rect") rectSel = null;
+    if (gesture === "resize") resize = null;
     if (mode === "obj" && selObj >= 0 && map.objects[selObj]) {
       // 選択中なら画面のどこをピンチしてもオブジェクトを拡縮
       gesture = "objpinch";
@@ -567,6 +637,21 @@ canvas.addEventListener("pointermove", (ev) => {
 
   if (pointers.size === 1) {
     const c = worldToCell(screenToWorld(p.x, p.y));
+    if (gesture === "resize") {
+      const wNow = screenToWorld(p.x, p.y);
+      const dx = Math.round((wNow.x - resize.world.x) / TILE);
+      const dy = Math.round((wNow.y - resize.world.y) / TILE);
+      const clamp = (v) => Math.max(8, Math.min(100, v));
+      let newW = resize.w0, newH = resize.h0, addLeft = 0, addTop = 0;
+      if (resize.edge === "r" || resize.edge === "br") newW = clamp(resize.w0 + dx);
+      if (resize.edge === "b" || resize.edge === "br") newH = clamp(resize.h0 + dy);
+      if (resize.edge === "l") { newW = clamp(resize.w0 - dx); addLeft = newW - resize.w0; }
+      if (resize.edge === "t") { newH = clamp(resize.h0 - dy); addTop = newH - resize.h0; }
+      Object.assign(resize, { newW, newH, addLeft, addTop });
+      showZoomHint(`${newW} × ${newH}`);
+      render();
+      return;
+    }
     if (gesture === "pending") {
       if (Math.hypot(p.x - down.p.x, p.y - down.p.y) > TAP_MOVE_PX) {
         cancelLongPress();
@@ -643,6 +728,11 @@ function pointerEnd(ev) {
     } else if (gesture === "rect") {
       const r = rectSel; rectSel = null;
       if (r) commitRect(r.a, r.b);
+      render();
+    } else if (gesture === "resize") {
+      const rs = resize; resize = null;
+      if (rs && (rs.newW !== rs.w0 || rs.newH !== rs.h0))
+        resizeMapTo(rs.newW, rs.newH, rs.addLeft, rs.addTop);
       render();
     } else if (gesture === "pan" && mode === "obj" && down && !down.moved && selObj >= 0) {
       // 空きを動かさずタップ → 選択解除
@@ -1322,6 +1412,11 @@ $("menuBtn").addEventListener("click", () => {
 });
 $("mClose").addEventListener("click", () => menuPanel.classList.add("hidden"));
 menuPanel.addEventListener("click", (e) => { if (e.target === menuPanel) menuPanel.classList.add("hidden"); });
+// ヘルプ・コツ・シート管理パネルも背景タップで閉じられるように
+for (const pid of ["helpPanel", "tipsPanel", "sheetPanel"]) {
+  const el = $(pid);
+  el.addEventListener("click", (e) => { if (e.target === el) el.classList.add("hidden"); });
+}
 
 $("mHelp").addEventListener("click", () => {
   menuPanel.classList.add("hidden");

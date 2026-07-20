@@ -54,6 +54,7 @@ input { user-select: text; -webkit-user-select: text; touch-action: auto; }
   display: flex; align-items: center; gap: 4px;
   padding: 6px 8px; background: #24273d;
   overflow-x: auto; scrollbar-width: none;
+  touch-action: pan-x;
 }
 #toolbar::-webkit-scrollbar { display: none; }
 #toolbar button {
@@ -83,12 +84,13 @@ input { user-select: text; -webkit-user-select: text; touch-action: auto; }
   padding: 6px 8px 0; flex-shrink: 0;
 }
 .recent-label { font-size: 11px; color: #889; flex-shrink: 0; }
-#recentTiles { display: flex; gap: 4px; overflow-x: auto; scrollbar-width: none; }
+#recentTiles { display: flex; gap: 4px; overflow-x: auto; scrollbar-width: none; touch-action: pan-x; }
 #recentTiles::-webkit-scrollbar { display: none; }
 #recentTiles .tile-btn { width: 38px; height: 38px; flex-shrink: 0; aspect-ratio: auto; }
 #paletteTabs {
   display: flex; gap: 4px; overflow-x: auto; padding: 6px 8px 4px; flex-shrink: 0;
   scrollbar-width: none;
+  touch-action: pan-x;
 }
 #paletteTabs::-webkit-scrollbar { display: none; }
 #paletteTabs button {
@@ -99,6 +101,7 @@ input { user-select: text; -webkit-user-select: text; touch-action: auto; }
 #paletteGrid {
   overflow-y: auto; padding: 4px 8px 8px;
   display: grid; grid-template-columns: repeat(auto-fill, minmax(46px, 1fr)); gap: 4px;
+  touch-action: pan-y;
 }
 .tile-btn {
   aspect-ratio: 1; border: 2px solid transparent; border-radius: 6px;
@@ -118,7 +121,7 @@ input { user-select: text; -webkit-user-select: text; touch-action: auto; }
   width: min(430px, 100%); display: flex; flex-direction: column; gap: 10px;
 }
 .list-inner h2 { font-size: 18px; text-align: center; padding: 8px 0; }
-#mapList { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
+#mapList { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; touch-action: pan-y; }
 .map-item {
   display: flex; align-items: center; gap: 10px;
   background: #24273d; border-radius: 12px; padding: 10px;
@@ -155,6 +158,7 @@ button.primary:active { background: #4a76e0; }
   background: #24273d; border-radius: 14px; padding: 18px;
   width: min(320px, 88vw); max-height: 80dvh; overflow-y: auto;
   display: flex; flex-direction: column; gap: 8px;
+  touch-action: pan-y;
 }
 .menu-inner h3 { margin-bottom: 4px; }
 .menu-inner button {
@@ -193,7 +197,7 @@ button.primary:active { background: #4a76e0; }
 .sheet-row { display: flex; align-items: center; gap: 6px; }
 .sheet-row .sheet-name { flex: 1; min-width: 0; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sheet-row button { flex-shrink: 0; width: 40px; padding: 10px 0; text-align: center; }
-#sheetList { display: flex; flex-direction: column; gap: 8px; max-height: 40dvh; overflow-y: auto; }
+#sheetList { display: flex; flex-direction: column; gap: 8px; max-height: 40dvh; overflow-y: auto; touch-action: pan-y; }
 #sheetList p { font-size: 13px; color: #889; }
 
 #loading {
